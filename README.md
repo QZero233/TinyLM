@@ -34,6 +34,13 @@
 - 训练工程细节完善：梯度裁剪、余弦学习率调度、checkpoint 保存/恢复
 - 支持单机快速冒烟与全量训练两种模式，便于开发调试和规模化运行切换
 
+## 更新策略与仓库定位
+
+后续功能迭代与代码更新将以 GitHub 仓库为主；ModelScope 仓库主要用于存放模型权重与训练数据。
+
+- GitHub（代码主仓库）：https://github.com/QZero233/TinyLM
+- ModelScope（权重与数据）：https://www.modelscope.cn/models/QZero233/tiny_lm/files
+
 ## 项目目标
 
 TinyLM 的目标是让你可以实际体验一遍大模型预训练的核心流程，包括：
