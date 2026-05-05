@@ -71,10 +71,11 @@ TinyLM/
 │   ├── train_model.py
 │   ├── train_model_dist.py
 │   └── eval_model.py
+├── saved_gpt_tokenizer/
 ├── checkpoint/
-│   ├── 4.5B.cpt
-│   └── saved_gpt_tokenizer/
+│   └── 4.5B.cpt
 └── data/
+    ├── test.txt
     ├── owt_train.txt / owt_valid.txt
     ├── train_*.npy
     └── valid_*.npy
@@ -116,7 +117,7 @@ uv run python -m tiny_lm.tokenize_data \
 
 ```bash
 uv run python -m tiny_lm.train_model \
-  --tokenizer_dir checkpoint/saved_gpt_tokenizer \
+  --tokenizer_dir saved_gpt_tokenizer \
   --checkpoint checkpoint/4.5B.cpt \
   --data_dir data \
   --checkpoint_base_dir checkpoint \
@@ -137,7 +138,7 @@ uv run python -m tiny_lm.train_model \
 ```bash
 uv run python -m tiny_lm.eval_model \
   --mode generate \
-  --tokenizer_dir checkpoint/saved_gpt_tokenizer \
+  --tokenizer_dir saved_gpt_tokenizer \
   --checkpoint checkpoint/4.5B.cpt \
   --prompt "The capital of the United States is a place called" \
   --max_seq_len 256
@@ -148,7 +149,7 @@ uv run python -m tiny_lm.eval_model \
 ```bash
 uv run python -m tiny_lm.eval_model \
   --mode valid_loss \
-  --tokenizer_dir checkpoint/saved_gpt_tokenizer \
+  --tokenizer_dir saved_gpt_tokenizer \
   --checkpoint checkpoint/4.5B.cpt
 ```
 
@@ -159,7 +160,7 @@ uv run python -m tiny_lm.eval_model \
 ```bash
 uv run torchrun --nnodes=1 --nproc_per_node=1 \
   -m tiny_lm.train_model_dist \
-  --tokenizer_dir checkpoint/saved_gpt_tokenizer \
+  --tokenizer_dir saved_gpt_tokenizer \
   --checkpoint checkpoint/4.5B.cpt \
   --data_dir data \
   --checkpoint_base_dir checkpoint \

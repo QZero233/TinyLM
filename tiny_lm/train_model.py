@@ -186,7 +186,7 @@ def _get_model_config(vocab_size: int) -> LMConfig:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train TinyLM")
-    parser.add_argument("--tokenizer_dir", type=str, default=os.path.join(PROJECT_ROOT, "checkpoint", "saved_gpt_tokenizer"))
+    parser.add_argument("--tokenizer_dir", type=str, default=os.path.join(PROJECT_ROOT, "saved_gpt_tokenizer"))
     parser.add_argument("--checkpoint", type=str, default=os.path.join(PROJECT_ROOT, "checkpoint", "new_epoch_5B_0", "9999.cpt"))
     parser.add_argument("--data_dir", type=str, default=os.path.join(PROJECT_ROOT, "data"))
     parser.add_argument("--checkpoint_base_dir", type=str, default=os.path.join(PROJECT_ROOT, "checkpoint"))

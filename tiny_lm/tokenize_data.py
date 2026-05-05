@@ -10,7 +10,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 def init_worker():
     global tokenizer
-    tokenizer = BPETokenizer.from_files(os.path.join(PROJECT_ROOT, "checkpoint", "saved_gpt_tokenizer"))
+    tokenizer = BPETokenizer.from_files(os.path.join(PROJECT_ROOT, "saved_gpt_tokenizer"))
 
 def process_data(file: str, result_file: str, start: int, size: int, i: int, total: int):
     print(f"Start {i} / {total}")

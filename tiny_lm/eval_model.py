@@ -121,7 +121,7 @@ def _eval_valid_loss(model: torch.nn.Module, config: LMConfig):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate or generate with TinyLM")
-    parser.add_argument("--tokenizer_dir", type=str, default=os.path.join(PROJECT_ROOT, "checkpoint", "saved_gpt_tokenizer"))
+    parser.add_argument("--tokenizer_dir", type=str, default=os.path.join(PROJECT_ROOT, "saved_gpt_tokenizer"))
     parser.add_argument("--checkpoint", type=str, default=os.path.join(PROJECT_ROOT, "checkpoint", "4.5B.cpt"))
     parser.add_argument("--mode", type=str, choices=["generate", "valid_loss"], default="generate")
     parser.add_argument("--prompt", type=str, default="The capital of the United States is a place called")
