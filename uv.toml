@@ -1,0 +1,5 @@
+python-preference = "system"
+link-mode = "copy"
+
+[pip]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
