@@ -46,6 +46,7 @@ class MultiHeadAttention(nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal_mask: bool = True,
                 rope_token_positions: Optional[torch.IntTensor] = None,
                 kv_cache_state: Optional[KVCacheState] = None) -> torch.Tensor:
+        batch_dim_shape = q.shape[:-2]
         proj_q = self.linear_q(q)
         proj_k = self.linear_k(k)
         proj_v = self.linear_v(v)
@@ -59,11 +60,11 @@ class MultiHeadAttention(nn.Module):
                 proj_k = torch.cat([cached_k, proj_k], dim=-2)
                 proj_v = torch.cat([cached_v, proj_v], dim=-2)
 
-        qs = proj_q.split(self.d_k, dim=-1)
-        ks = proj_k.split(self.d_k, dim=-1)
-        vs = proj_v.split(self.d_k, dim=-1)
+        # (...batch, seq_len, d_model) -> (...batch, seq_len, num_heads, d_k) -> (...batch, num_heads, seq_len, d_k)
+        qs = proj_q.reshape((*batch_dim_shape, proj_q.shape[-2], self.num_heads, self.d_k)).transpose(-2, -3)
+        ks = proj_k.reshape((*batch_dim_shape, proj_k.shape[-2], self.num_heads, self.d_k)).transpose(-2, -3)
+        vs = proj_v.reshape((*batch_dim_shape, proj_v.shape[-2], self.num_heads, self.d_k)).transpose(-2, -3)
 
-        attention_res = []
         mask = None
         if causal_mask:
             q_len = proj_q.shape[-2]
@@ -72,16 +73,16 @@ class MultiHeadAttention(nn.Module):
             q_positions = torch.arange(q_len, device=proj_q.device) + q_start
             k_positions = torch.arange(k_len, device=proj_q.device)
             mask = k_positions.unsqueeze(0) <= q_positions.unsqueeze(1)
-            mask = mask.broadcast_to((*proj_q.shape[:-2], q_len, k_len))
+            mask = mask.broadcast_to((*proj_q.shape[:-2], self.num_heads, q_len, k_len))
 
-        # TODO 也许这里的for循环有优化空间？
-        for i in range(self.num_heads):
-            current_q, current_k, current_v = qs[i], ks[i], vs[i]
-            if self.rope is not None:
-                current_q = self.rope(current_q, rope_token_positions)
-                current_k = self.rope(current_k, rope_token_positions)
-            attention_res.append(self.attention(current_q, current_k, current_v, mask))
+        if self.rope is not None:
+            qs = self.rope(qs, rope_token_positions)
+            ks = self.rope(ks, rope_token_positions)
+        attention_res = self.attention(qs, ks, vs, mask)
 
-        attention_res = torch.cat(attention_res, dim=-1)
+        # (...batch, num_heads, seq_len, d_k) -> (...batch, seq_len, num_heads, d_k) -> (...batch, seq_len, d_model)
+        attention_res = attention_res.transpose(-2, -3)
+        attention_res = attention_res.reshape((*batch_dim_shape, attention_res.shape[-3], -1))
+
         return self.linear_out(attention_res)
 
