@@ -1,16 +1,24 @@
-import random
-import os
 import argparse
-from typing import List, Tuple, Optional
+import random
+from typing import List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
 
-from tiny_lm import TinyStoryDataset, cross_entropy_loss, BPETokenizer, TransformerKVCache
-from tiny_lm.train_model import LMConfig, load_tokenizer, init_model, _get_model_config
+from tiny_lm import (
+    DEFAULT_TRAIN_CONFIG,
+    ModelConfig,
+    TransformerKVCache,
+    cross_entropy_loss,
+    get_dataset,
+    get_tokenizer,
+    init_model_from_checkpoint,
+    load_train_config,
+)
 
-device="cuda"
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+device = "cuda"
+
 
 def _apply_repetition_penalty(logits: torch.Tensor, input_token_ids: List[int], repetition_penalty: float) -> torch.Tensor:
     if repetition_penalty <= 1.0 or len(input_token_ids) == 0:
@@ -30,7 +38,7 @@ def _predict_next_token(
     top_p: float = 0.9,
     greedy: bool = False,
     repetition_penalty: float = 1.0,
-    kv_cache: Optional[TransformerKVCache] = None
+    kv_cache: Optional[TransformerKVCache] = None,
 ) -> int:
     input_token_ids_tensor = torch.tensor(input_token_ids, device=device)
 
@@ -46,17 +54,14 @@ def _predict_next_token(
             max_token_id = torch.argmax(logits)
             return max_token_id.item()
 
-    # logits: (vocab_size,)
     prob = torch.softmax(logits, dim=-1)
     prob_map: List[Tuple[float, int]] = [(prob[i].item(), i) for i in range(prob.shape[-1])]
-    prob_map.sort()
-    prob_map.reverse()
+    prob_map.sort(reverse=True)
 
-    accumulated_prob = 0
+    accumulated_prob = 0.0
     end_index = 0
     for i in range(len(prob_map)):
         accumulated_prob += prob_map[i][0]
-
         if accumulated_prob >= top_p:
             end_index = i + 1
             break
@@ -65,30 +70,45 @@ def _predict_next_token(
     for i in range(end_index):
         new_distribution.append((prob_map[i][0] / accumulated_prob, prob_map[i][1]))
 
-    if len(new_distribution) == 0:
+    if not new_distribution:
         return torch.argmax(logits).item()
 
     _, res_token_id = random.choices(new_distribution, weights=[p[0] for p in new_distribution], k=1)[0]
     return res_token_id
 
+
+def _get_eos_token_id(tokenizer) -> Optional[int]:
+    if hasattr(tokenizer, "eos_id"):
+        return tokenizer.eos_id
+
+    if hasattr(tokenizer, "encode"):
+        try:
+            eos_ids = tokenizer.encode("<|endoftext|>")
+        except Exception:
+            eos_ids = []
+        if len(eos_ids) == 1:
+            return eos_ids[0]
+
+    return None
+
+
 def _auto_regression(
     prompt: str,
     max_seq_len: int,
     model: torch.nn.Module,
-    tokenizer: BPETokenizer,
+    tokenizer,
     repetition_penalty: float = 1.0,
-    kv_cache: Optional[TransformerKVCache] = None
+    kv_cache: Optional[TransformerKVCache] = None,
 ) -> str:
-    assert len(tokenizer.encode("<|endoftext|>")) == 1
-    eos_token_id = tokenizer.encode("<|endoftext|>")[0]
     token_ids = tokenizer.encode(prompt)
+    eos_token_id = _get_eos_token_id(tokenizer)
 
-    while len(token_ids) < max_seq_len and token_ids[-1] != eos_token_id:
+    while len(token_ids) < max_seq_len and (eos_token_id is None or token_ids[-1] != eos_token_id):
         next_id = _predict_next_token(
             token_ids,
             model,
             repetition_penalty=repetition_penalty,
-            kv_cache=kv_cache
+            kv_cache=kv_cache,
         )
         token_ids.append(next_id)
         if len(token_ids) % 20 == 0:
@@ -96,17 +116,25 @@ def _auto_regression(
 
     return tokenizer.decode(token_ids)
 
-def _eval_valid_loss(model: torch.nn.Module, config: LMConfig):
-    valid_data = TinyStoryDataset(os.path.join(PROJECT_ROOT, "data"), seq_len=config.context_length, train=False)
-    data_loader = DataLoader(valid_data, batch_size=32, shuffle=True)
-    total_loss = 0
+
+def _eval_valid_loss(model: torch.nn.Module, config: ModelConfig, train_config, eval_batch_size: int):
+    valid_data = get_dataset(
+        train_config.dataset_type,
+        train_config.data_dir,
+        seq_len=config.context_length,
+        zh_token_dtype=train_config.zh_token_dtype,
+        zh_fold=train_config.zh_fold,
+        train=False,
+    )
+    data_loader = DataLoader(valid_data, batch_size=eval_batch_size, shuffle=True)
+    total_loss = 0.0
     total_num = 0
 
     model.eval()
     n = len(data_loader)
     for i, (x, y) in enumerate(data_loader):
-        x=x.to(device=device)
-        y=y.to(device=device)
+        x = x.to(device=device)
+        y = y.to(device=device)
 
         with torch.no_grad():
             logits = model(x, None)
@@ -121,36 +149,34 @@ def _eval_valid_loss(model: torch.nn.Module, config: LMConfig):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate or generate with TinyLM")
-    parser.add_argument("--tokenizer_dir", type=str, default=os.path.join(PROJECT_ROOT, "saved_gpt_tokenizer"))
-    parser.add_argument("--checkpoint", type=str, default=os.path.join(PROJECT_ROOT, "checkpoint", "4.5B.cpt"))
+    parser.add_argument("--config", type=str, default=DEFAULT_TRAIN_CONFIG)
+    parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--mode", type=str, choices=["generate", "valid_loss"], default="generate")
-    parser.add_argument("--prompt", type=str, default="The capital of the United States is a place called")
+    parser.add_argument("--prompt", type=str, default="美国首都是")
     parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--context_length", type=int, default=None)
-    parser.add_argument("--num_layers", type=int, default=None)
-    parser.add_argument("--d_model", type=int, default=None)
-    parser.add_argument("--num_heads", type=int, default=None)
-    parser.add_argument("--d_ff", type=int, default=None)
+    parser.add_argument("--eval_batch_size", type=int, default=32)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
     args = parser.parse_args()
 
-    tokenizer = load_tokenizer(args.tokenizer_dir)
-    config = _get_model_config(len(tokenizer.vocab))
-    if args.context_length is not None:
-        config.context_length = args.context_length
-    if args.num_layers is not None:
-        config.num_layers = args.num_layers
-    if args.d_model is not None:
-        config.d_model = args.d_model
-    if args.num_heads is not None:
-        config.num_heads = args.num_heads
-    if args.d_ff is not None:
-        config.d_ff = args.d_ff
+    train_config, config, _ = load_train_config(args.config)
+    tokenizer = get_tokenizer(train_config.tokenizer_name)
 
-    model = init_model(config, args.checkpoint if args.checkpoint else None)
+    checkpoint = args.checkpoint if args.checkpoint is not None else train_config.checkpoint
+    checkpoint = checkpoint if checkpoint else None
+    model = init_model_from_checkpoint(config, checkpoint)
     model = model.to(device)
 
     if args.mode == "valid_loss":
-        _eval_valid_loss(model, config)
+        _eval_valid_loss(model, config, train_config, args.eval_batch_size)
     else:
         kv_cache = TransformerKVCache(config.num_layers)
-        print(_auto_regression(args.prompt, max_seq_len=args.max_seq_len, model=model, tokenizer=tokenizer, repetition_penalty=1.05, kv_cache=kv_cache))
+        print(
+            _auto_regression(
+                args.prompt,
+                max_seq_len=args.max_seq_len,
+                model=model,
+                tokenizer=tokenizer,
+                repetition_penalty=args.repetition_penalty,
+                kv_cache=kv_cache,
+            )
+        )

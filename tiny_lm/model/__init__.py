@@ -4,3 +4,4 @@ from .norm import *
 from .attention import *
 from .transformer import *
 from .kv_cache import *
+from .lora import *

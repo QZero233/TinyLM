@@ -1,0 +1,29 @@
+{
+  "training": {
+    "tokenizer_name": "chatglm3",
+    "checkpoint": "",
+    "data_dir": "/root/autodl-tmp/zh_data/pre_train",
+    "dataset_type": "zh",
+    "zh_token_dtype": "uint16",
+    "checkpoint_base_dir": "/root/autodl-tmp/TinyLM/checkpoint_train",
+    "epochs": 20,
+    "gradient_accumulate": 8
+  },
+  "model": {
+    "context_length": 1024,
+    "num_layers": 8,
+    "d_model": 512,
+    "num_heads": 8,
+    "d_ff": 1408,
+    "theta": 10000,
+    "gradient_checkpoint": true,
+    "batch_size": 16
+  },
+  "optimizer": {
+    "lr": 0.001,
+    "beta_1": 0.9,
+    "beta_2": 0.95,
+    "weight_decay": 0.1,
+    "eps": 0.000001
+  }
+}

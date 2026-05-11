@@ -10,6 +10,8 @@ from .attention import MultiHeadAttention
 from .common import SwiGLU, Linear
 from .embedding import Embedding
 from .kv_cache import KVCacheState, TransformerKVCache
+from .lora import LoRALinear, LoRAConfig
+from .utils import replace_submodule
 
 class TransformerBlock(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int = 1024,
@@ -39,9 +41,8 @@ class Transformer(nn.Module):
         self.transformer_layers = nn.ModuleList([TransformerBlock(d_model, num_heads, d_ff, context_length,theta) for _ in range(num_layers)])
         self.embedding = Embedding(vocab_size, d_model)
         self.norm = RMSNorm(d_model)
-        self.linear = Linear(d_model, vocab_size)
 
-    def forward(self, x: torch.Tensor, kv_cache: Optional[TransformerKVCache]) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, kv_cache: Optional[TransformerKVCache]=None) -> torch.Tensor:
         # Input: (batch_size, seq_len)
         # Output: (batch_size, seq_len, vocab_size)
         if kv_cache is not None:
@@ -51,12 +52,13 @@ class Transformer(nn.Module):
 
         for i, layer in enumerate(self.transformer_layers):
             kv_cache_state = kv_cache[i] if kv_cache is not None else None
-            if self.training and self.gradient_checkpoint:
+            if self.training and self.gradient_checkpoint and i % 4 == 0:
                 x = checkpoint(layer, x, kv_cache_state=kv_cache_state, use_reentrant=False)
             else:
                 x = layer(x, kv_cache_state=kv_cache_state)
         x = self.norm(x)
-        x = self.linear(x)
+        # 使用Shared Weight，和Embedding共享权重
+        x = x @ self.embedding.embedding_matrix.T
         return x
 
     def resize_embedding(self, new_size: int):
@@ -73,3 +75,18 @@ class Transformer(nn.Module):
         nn.init.trunc_normal_(new_linear_weight, mean=0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
         new_linear_weight[:origin_vocab_size, :] = self.linear.weights
         self.linear.weights = nn.Parameter(new_linear_weight)
+
+    def _freeze_params(self):
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def adapt_lora(self, lora_configs: List[LoRAConfig]):
+        self._freeze_params()
+        # 替换对应的Linear层
+        for config in lora_configs:
+            old_linear = self.get_submodule(config.module_name)
+            lora_linear = LoRALinear(old_linear, config.b, config.a)
+            lora_linear.b.requires_grad = True
+            lora_linear.a.requires_grad = True
+            replace_submodule(self, config.module_name, lora_linear)
+

@@ -1,0 +1,107 @@
+import bisect
+import os
+import random
+from dataclasses import dataclass
+from typing import List
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+
+MAX_ZH_DATASET_SAMPLES = 40_000_000
+
+
+@dataclass(frozen=True)
+class _ShardInfo:
+    path: str
+    token_count: int
+    sample_count: int
+
+
+class TinyLMZhDataset(Dataset):
+    def __init__(self, data_dir: str, seq_len: int, dtype: str = "uint16", fold: int | None = None,
+                 max_samples: int = MAX_ZH_DATASET_SAMPLES):
+        self.shards: List[_ShardInfo] = []
+        self.seq_len = seq_len
+        self.dtype = np.dtype(dtype)
+        self.max_samples = max_samples
+        self.fold = fold
+        self._memmap_cache: dict[int, np.memmap] = {}
+        self._cumulative_sample_ends: List[int] = []
+
+        if self.max_samples <= 0:
+            raise ValueError(f"max_samples must be positive, got {self.max_samples}")
+
+        total_samples = 0
+        for root, _, files in os.walk(data_dir):
+            for file in sorted(files):
+                if file.endswith(".bin"):
+                    path = os.path.join(root, file)
+                    token_count = os.path.getsize(path) // self.dtype.itemsize
+                    sample_count = token_count - seq_len
+                    if sample_count > 0:
+                        self.shards.append(
+                            _ShardInfo(path=path, token_count=token_count, sample_count=sample_count)
+                        )
+                        total_samples += sample_count
+                        self._cumulative_sample_ends.append(total_samples)
+
+        if not self.shards:
+            raise ValueError(f"No usable .bin token files found in {data_dir}")
+
+        self.total_samples = total_samples
+        self.window_start, self.window_size = self._select_window(fold)
+        self.window_end = self.window_start + self.window_size
+
+    def __len__(self):
+        return self.window_size
+
+    def _select_window(self, fold: int | None) -> tuple[int, int]:
+        if fold is not None and fold < 0:
+            raise ValueError(f"fold must be non-negative, got {fold}")
+
+        if self.total_samples <= self.max_samples:
+            if fold not in (None, 0):
+                raise ValueError(
+                    f"fold {fold} is out of range: dataset only has {self.total_samples} samples, "
+                    f"which fits in a single fold"
+                )
+            return 0, self.total_samples
+
+        if fold is None:
+            window_start = random.randint(0, self.total_samples - self.max_samples)
+            return window_start, self.max_samples
+
+        window_start = fold * self.max_samples
+        if window_start >= self.total_samples:
+            max_fold = (self.total_samples - 1) // self.max_samples
+            raise ValueError(f"fold {fold} is out of range, valid folds: 0..{max_fold}")
+        return window_start, min(self.max_samples, self.total_samples - window_start)
+
+    def _get_memmap(self, shard_idx: int) -> np.memmap:
+        memmap = self._memmap_cache.get(shard_idx)
+        if memmap is None:
+            shard = self.shards[shard_idx]
+            # Open shards lazily so dataset init does not map every file up front.
+            memmap = np.memmap(shard.path, dtype=self.dtype, mode="r", shape=(shard.token_count,))
+            self._memmap_cache[shard_idx] = memmap
+        return memmap
+
+    def __getitem__(self, idx):
+        if idx < 0 or idx >= self.window_size:
+            raise IndexError(f"Index {idx} out of range for dataset of size {self.window_size}")
+
+        global_idx = self.window_start + idx
+        shard_idx = bisect.bisect_right(self._cumulative_sample_ends, global_idx)
+        prev_end = 0 if shard_idx == 0 else self._cumulative_sample_ends[shard_idx - 1]
+        shard_offset = global_idx - prev_end
+
+        target_batch = self._get_memmap(shard_idx)
+        shard = self.shards[shard_idx]
+        assert shard_offset < shard.sample_count
+
+        x = target_batch[shard_offset:shard_offset + self.seq_len].astype(np.int64)
+        y = target_batch[shard_offset + 1:shard_offset + self.seq_len + 1].astype(np.int64)
+
+        return torch.LongTensor(x), torch.LongTensor(y)

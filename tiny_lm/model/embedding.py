@@ -11,7 +11,7 @@ class Embedding(nn.Module):
         self.embedding_dim = embedding_dim
 
         self.embedding_matrix = nn.Parameter(torch.zeros((num_embeddings, embedding_dim)))
-        nn.init.trunc_normal_(self.embedding_matrix, mean=0, std=1, a=-3, b=3)
+        nn.init.trunc_normal_(self.embedding_matrix, mean=0, std=0.02)
 
     def forward(self, token_ids: torch.LongTensor) -> torch.Tensor:
         # token_ids: (batch_size, sequence_length)

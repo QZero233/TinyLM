@@ -7,8 +7,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
-from tiny_lm import AdamW, TinyStoryDataset
-from .train_model import load_tokenizer, _get_model_config, init_model, train_epoch
+from tiny_lm import TinyStoryDataset, get_default_model_config, get_default_optimizer_config, \
+    init_model_from_checkpoint, init_optimizer
+from .train_model import load_tokenizer, train_epoch
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -40,7 +41,8 @@ if __name__ == "__main__":
 
     tokenizer = load_tokenizer(args.tokenizer_dir)
     batch_size = args.batch_size
-    config = _get_model_config(len(tokenizer.vocab))
+    config = get_default_model_config(len(tokenizer.vocab))
+    optimizer_config = get_default_optimizer_config()
     if args.context_length is not None:
         config.context_length = args.context_length
     if args.num_layers is not None:
@@ -52,12 +54,12 @@ if __name__ == "__main__":
     if args.d_ff is not None:
         config.d_ff = args.d_ff
 
-    model = init_model(config, args.checkpoint if args.checkpoint else None)
+    model = init_model_from_checkpoint(config, args.checkpoint if args.checkpoint else None)
     t = 0
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank])
 
-    optimizer = AdamW(model.parameters(), lr=config.lr, betas=(config.beta_1, config.beta_2), weight_decay=config.weight_decay)
+    optimizer = init_optimizer(optimizer_config, model)
 
     model.train()
     model = torch.compile(model)
