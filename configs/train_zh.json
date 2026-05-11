@@ -1,7 +1,7 @@
 {
   "training": {
     "tokenizer_path": "/root/autodl-tmp/zh_data/chatglm3_tokenizer",
-    "checkpoint": "",
+    "checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_train/92M_0_0/4248.cpt",
     "data_dir": "/root/autodl-tmp/zh_data/pre_train",
     "zh_token_dtype": "uint16",
     "checkpoint_base_dir": "/root/autodl-tmp/TinyLM/checkpoint_train",

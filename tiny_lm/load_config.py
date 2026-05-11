@@ -22,7 +22,6 @@ class TrainConfig:
     checkpoint_base_dir: str
     epochs: int
     gradient_accumulate: int
-    zh_fold: int | None = None
 
 
 def get_tokenizer(tokenizer_path: str) -> TokenizersBackend | SentencePieceBackend:
@@ -34,12 +33,12 @@ def load_tokenizer(tokenizer_path: str) -> TokenizersBackend | SentencePieceBack
 
 
 def get_dataset(data_dir: str, seq_len: int, zh_token_dtype: str = "uint16",
-                zh_fold: int | None = None) -> TinyLMZhDataset:
+                full_random: bool = True) -> TinyLMZhDataset:
     return TinyLMZhDataset(
         data_dir=data_dir,
         seq_len=seq_len,
         dtype=zh_token_dtype,
-        fold=zh_fold,
+        full_random=full_random,
     )
 
 

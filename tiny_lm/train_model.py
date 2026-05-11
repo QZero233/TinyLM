@@ -148,8 +148,6 @@ if __name__ == "__main__":
     model = init_model_from_checkpoint(config, checkpoint)
     optimizer, t = init_optimizer_from_checkpoint(optimizer_config, model, checkpoint)
 
-    t = 0
-
     model.train()
     model.to("cuda")
     model = torch.compile(model)
@@ -163,12 +161,12 @@ if __name__ == "__main__":
         train_config.data_dir,
         seq_len=config.context_length,
         zh_token_dtype=train_config.zh_token_dtype,
-        zh_fold=train_config.zh_fold,
+        full_random=True
     )
-    dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=config.batch_size)
     for i in range(train_config.epochs):
         print(f"Start epoch {i}")
-        checkpoint_dir = os.path.join(train_config.checkpoint_base_dir, f"72M_2_{i}")
+        checkpoint_dir = os.path.join(train_config.checkpoint_base_dir, f"92M_0_{i}")
         if not os.path.exists(checkpoint_dir):
             os.mkdir(checkpoint_dir)
         train_epoch(dataloader, model, optimizer, checkpoint_dir, t, train_config.gradient_accumulate)

@@ -151,7 +151,7 @@ def _eval_valid_loss(model: torch.nn.Module, config: ModelConfig, train_config: 
         train_config.data_dir,
         seq_len=config.context_length,
         zh_token_dtype=train_config.zh_token_dtype,
-        zh_fold=train_config.zh_fold,
+        full_random=False,
     )
     data_loader = DataLoader(valid_data, batch_size=eval_batch_size, shuffle=True)
     total_loss = 0.0
