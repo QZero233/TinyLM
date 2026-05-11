@@ -15,7 +15,7 @@ from tiny_lm import ModelConfig, get_dataset, load_train_config, init_model_from
 MIN_FREE_SPACE_BYTES = 5 * 1024 ** 3
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-def _param_estimate(config: ModelConfig):
+def _param_estimate(config: ModelConfig) -> None:
     batch = config.batch_size
     vocab, d_model, layers, d_ff = config.vocab_size, config.d_model, config.num_layers, config.d_ff
     param_fp32_num = 2*vocab*d_model+d_model+layers*(2*d_model+4*d_model**2+3*d_model*d_ff)
@@ -28,7 +28,7 @@ def _save_checkpoint_with_cleanup(
     model: torch.nn.Module,
     optimizer: Optimizer,
     checkpoint_file_path: str,
-):
+) -> None:
     def cleanup_old_checkpoints(protected_file: str | None = None):
         free_space = shutil.disk_usage(checkpoint_root).free
         if free_space >= MIN_FREE_SPACE_BYTES:
@@ -94,7 +94,7 @@ def _save_checkpoint_with_cleanup(
         )
 
 def train_epoch(dataloader: DataLoader, model: torch.nn.Module, optimizer: Optimizer, checkpoint_dir: str,
-                last_train_step: int, gradient_accumulate: int = 1):
+                last_train_step: int, gradient_accumulate: int = 1) -> None:
     print("Data loader size: ", len(dataloader))
     n=len(dataloader)
     total_loss = 0
@@ -160,12 +160,10 @@ if __name__ == "__main__":
                 state[k] = v.cuda()
 
     dataset = get_dataset(
-        train_config.dataset_type,
         train_config.data_dir,
         seq_len=config.context_length,
         zh_token_dtype=train_config.zh_token_dtype,
         zh_fold=train_config.zh_fold,
-        train=True,
     )
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
     for i in range(train_config.epochs):

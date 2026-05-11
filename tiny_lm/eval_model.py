@@ -4,10 +4,12 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
+from transformers import SentencePieceBackend, TokenizersBackend
 
 from tiny_lm import (
     DEFAULT_TRAIN_CONFIG,
     ModelConfig,
+    TrainConfig,
     TransformerKVCache,
     cross_entropy_loss,
     get_dataset,
@@ -18,6 +20,7 @@ from tiny_lm import (
 
 
 device = "cuda"
+TokenizerT = TokenizersBackend | SentencePieceBackend
 
 
 def _apply_repetition_penalty(logits: torch.Tensor, input_token_ids: List[int], repetition_penalty: float) -> torch.Tensor:
@@ -77,13 +80,37 @@ def _predict_next_token(
     return res_token_id
 
 
-def _get_eos_token_id(tokenizer) -> Optional[int]:
+def _encode_text(tokenizer: TokenizerT, text: str) -> List[int]:
+    if hasattr(tokenizer, "tokenizer") and hasattr(tokenizer.tokenizer, "encode"):
+        try:
+            return tokenizer.tokenizer.encode(text, bos=False, eos=False)
+        except TypeError:
+            return tokenizer.tokenizer.encode(text)
+
+    if hasattr(tokenizer, "sp_model") and hasattr(tokenizer.sp_model, "encode"):
+        return tokenizer.sp_model.encode(text)
+
+    if hasattr(tokenizer, "encode"):
+        try:
+            return tokenizer.encode(text, add_special_tokens=False)
+        except TypeError:
+            return tokenizer.encode(text)
+
+    encoded = tokenizer(text, add_special_tokens=False)
+    return encoded["input_ids"]
+
+
+def _get_eos_token_id(tokenizer: TokenizerT) -> Optional[int]:
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_token_id is not None:
+        return eos_token_id
+
     if hasattr(tokenizer, "eos_id"):
         return tokenizer.eos_id
 
     if hasattr(tokenizer, "encode"):
         try:
-            eos_ids = tokenizer.encode("<|endoftext|>")
+            eos_ids = _encode_text(tokenizer, "<|endoftext|>")
         except Exception:
             eos_ids = []
         if len(eos_ids) == 1:
@@ -96,12 +123,13 @@ def _auto_regression(
     prompt: str,
     max_seq_len: int,
     model: torch.nn.Module,
-    tokenizer,
+    tokenizer: TokenizerT,
     repetition_penalty: float = 1.0,
     kv_cache: Optional[TransformerKVCache] = None,
 ) -> str:
-    token_ids = tokenizer.encode(prompt)
+    token_ids = _encode_text(tokenizer, prompt)
     eos_token_id = _get_eos_token_id(tokenizer)
+    print(f"Eos token id {eos_token_id}")
 
     while len(token_ids) < max_seq_len and (eos_token_id is None or token_ids[-1] != eos_token_id):
         next_id = _predict_next_token(
@@ -117,14 +145,13 @@ def _auto_regression(
     return tokenizer.decode(token_ids)
 
 
-def _eval_valid_loss(model: torch.nn.Module, config: ModelConfig, train_config, eval_batch_size: int):
+def _eval_valid_loss(model: torch.nn.Module, config: ModelConfig, train_config: TrainConfig,
+                     eval_batch_size: int) -> None:
     valid_data = get_dataset(
-        train_config.dataset_type,
         train_config.data_dir,
         seq_len=config.context_length,
         zh_token_dtype=train_config.zh_token_dtype,
         zh_fold=train_config.zh_fold,
-        train=False,
     )
     data_loader = DataLoader(valid_data, batch_size=eval_batch_size, shuffle=True)
     total_loss = 0.0
@@ -159,7 +186,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     train_config, config, _ = load_train_config(args.config)
-    tokenizer = get_tokenizer(train_config.tokenizer_name)
+    tokenizer = get_tokenizer(train_config.tokenizer_path)
 
     checkpoint = args.checkpoint if args.checkpoint is not None else train_config.checkpoint
     checkpoint = checkpoint if checkpoint else None
