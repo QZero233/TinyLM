@@ -33,8 +33,9 @@ class LoraTrainConfig:
     r: int
     checkpoint_base_dir: str
     data_dir: str
-    model_checkpoint: str
+    base_model_checkpoint: str
     lora_checkpoint: str = ""
+    fix_lr: float | None = None
     auto_resize_embedding: bool = True
     valid_steps: int = 200
     checkpoint_save_steps: int = 200
@@ -124,6 +125,8 @@ def load_lora_train_config(config_file: str) -> Tuple[TrainConfig, ModelConfig, 
     lora_config = _build_dataclass(LoraTrainConfig, lora_values, "training.lora")
     if lora_config.r <= 0:
         raise ValueError("training.lora.r must be > 0")
-    if not lora_config.model_checkpoint:
-        raise ValueError("training.lora.model_checkpoint must not be empty")
+    if not lora_config.base_model_checkpoint:
+        raise ValueError("training.lora.base_model_checkpoint must not be empty")
+    if lora_config.fix_lr is not None and lora_config.fix_lr <= 0:
+        raise ValueError("training.lora.fix_lr must be > 0 when set")
     return train_config, model_config, optimizer_config, lora_config

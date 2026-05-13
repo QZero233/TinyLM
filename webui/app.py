@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import random
 import threading
@@ -13,7 +14,15 @@ from typing import Any, Optional
 
 import torch
 
-from tiny_lm import TransformerKVCache, get_tokenizer, init_model_from_checkpoint, load_lora_configs, load_train_config
+from tiny_lm import (
+    LoRAConfig,
+    TransformerKVCache,
+    get_tokenizer,
+    init_model_from_checkpoint,
+    load_lora_configs,
+    load_lora_trainable_checkpoint,
+    load_train_config,
+)
 
 
 HTML_PAGE = """<!doctype html>
@@ -82,6 +91,27 @@ HTML_PAGE = """<!doctype html>
       white-space: pre-wrap;
       background: #fffeff;
     }
+    .token-panel {
+      margin-top: 12px;
+      display: grid;
+      gap: 12px;
+    }
+    .token-box {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      background: #fff;
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 72px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+    }
+    .token-title {
+      margin: 0 0 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
     .tiny { font-size: 12px; color: var(--muted); }
     @media (max-width: 760px) {
       .row { grid-template-columns: 1fr; }
@@ -103,9 +133,9 @@ HTML_PAGE = """<!doctype html>
         <label>Checkpoint</label>
         <select id=\"checkpoint\"></select>
       </div>
-      <div class=\"full\" id=\"lora_pair_row\" style=\"display:none;\">
-        <label>LoRA Pair</label>
-        <select id=\"lora_pair\"></select>
+      <div class=\"full\" id=\"lora_checkpoint_row\" style=\"display:none;\">
+        <label>LoRA Checkpoint</label>
+        <select id=\"lora_checkpoint\"></select>
       </div>
       <div>
         <label>Max Seq Len</label>
@@ -134,16 +164,28 @@ HTML_PAGE = """<!doctype html>
     <button id=\"run\">生成</button>
     <div class=\"status\" id=\"status\"></div>
     <div class=\"output\" id=\"output\"></div>
+    <div class=\"token-panel\">
+      <div>
+        <div class=\"token-title\">输入 token ids</div>
+        <div class=\"token-box\" id=\"input_token_ids\"></div>
+      </div>
+      <div>
+        <div class=\"token-title\">输出 token ids</div>
+        <div class=\"token-box\" id=\"output_token_ids\"></div>
+      </div>
+    </div>
     <p class=\"tiny\" id=\"meta\"></p>
   </div>
 
   <script>
     const checkpointSel = document.getElementById('checkpoint');
     const modeSel = document.getElementById('mode');
-    const loraPairRow = document.getElementById('lora_pair_row');
-    const loraPairSel = document.getElementById('lora_pair');
+    const loraCheckpointRow = document.getElementById('lora_checkpoint_row');
+    const loraCheckpointSel = document.getElementById('lora_checkpoint');
     const statusEl = document.getElementById('status');
     const outputEl = document.getElementById('output');
+    const inputTokenIdsEl = document.getElementById('input_token_ids');
+    const outputTokenIdsEl = document.getElementById('output_token_ids');
     const metaEl = document.getElementById('meta');
     const runBtn = document.getElementById('run');
     let checkpointPayload = null;
@@ -161,16 +203,14 @@ HTML_PAGE = """<!doctype html>
       }
       if (data.default_checkpoint) checkpointSel.value = data.default_checkpoint;
 
-      loraPairSel.innerHTML = '';
-      for (const item of (data.lora_pairs || [])) {
+      loraCheckpointSel.innerHTML = '';
+      for (const item of (data.lora_checkpoints || [])) {
         const opt = document.createElement('option');
-        opt.value = item.id;
+        opt.value = item.path;
         opt.textContent = item.label;
-        opt.dataset.modelCheckpoint = item.model_checkpoint;
-        opt.dataset.loraCheckpoint = item.lora_checkpoint;
-        loraPairSel.appendChild(opt);
+        loraCheckpointSel.appendChild(opt);
       }
-      if (data.default_lora_pair_id) loraPairSel.value = data.default_lora_pair_id;
+      if (data.default_lora_checkpoint) loraCheckpointSel.value = data.default_lora_checkpoint;
 
       metaEl.textContent = `config: ${data.config_path} | device: ${data.device}`;
       updateModeUI();
@@ -178,27 +218,25 @@ HTML_PAGE = """<!doctype html>
 
     function updateModeUI() {
       const mode = modeSel.value;
-      loraPairRow.style.display = mode === 'lora' ? '' : 'none';
+      loraCheckpointRow.style.display = mode === 'lora' ? '' : 'none';
     }
 
     async function runGenerate() {
       runBtn.disabled = true;
       statusEl.textContent = '推理中...';
       outputEl.textContent = '';
+      inputTokenIdsEl.textContent = '';
+      outputTokenIdsEl.textContent = '';
       try {
         const mode = modeSel.value;
-        let loraModelCheckpoint = '';
         let loraCheckpoint = '';
         if (mode === 'lora') {
-          const selected = loraPairSel.selectedOptions[0];
-          if (!selected) throw new Error('请选择 LoRA 权重对');
-          loraModelCheckpoint = selected.dataset.modelCheckpoint;
-          loraCheckpoint = selected.dataset.loraCheckpoint;
+          loraCheckpoint = loraCheckpointSel.value;
+          if (!loraCheckpoint) throw new Error('请选择 LoRA checkpoint');
         }
         const payload = {
           mode: mode,
           checkpoint: checkpointSel.value,
-          lora_model_checkpoint: loraModelCheckpoint,
           lora_checkpoint: loraCheckpoint,
           prompt: document.getElementById('prompt').value,
           max_seq_len: Number(document.getElementById('max_seq_len').value),
@@ -215,6 +253,8 @@ HTML_PAGE = """<!doctype html>
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'request failed');
         outputEl.textContent = data.text;
+        inputTokenIdsEl.textContent = JSON.stringify(data.input_token_ids || []);
+        outputTokenIdsEl.textContent = JSON.stringify(data.output_token_ids || []);
         statusEl.textContent = `完成，耗时 ${data.elapsed_sec.toFixed(2)}s`;
       } catch (err) {
         statusEl.textContent = `失败: ${err.message}`;
@@ -251,6 +291,7 @@ class TinyLMService:
         )
         self.lora_checkpoint_dir: Optional[str] = None
         self.lora_r: Optional[int] = None
+        self.lora_base_model_checkpoint: Optional[str] = None
         with open(self.config_path, "r", encoding="utf-8") as f:
             raw_cfg = json.load(f)
         lora_cfg = raw_cfg.get("training", {}).get("lora", {})
@@ -261,8 +302,27 @@ class TinyLMService:
             r = lora_cfg.get("r", None)
             if isinstance(r, int) and r > 0:
                 self.lora_r = r
+            base_model_checkpoint = lora_cfg.get("base_model_checkpoint", "")
+            if base_model_checkpoint:
+                self.lora_base_model_checkpoint = os.path.abspath(base_model_checkpoint)
         self._model_lock = threading.Lock()
         self._loaded: Optional[LoadedModel] = None
+
+    def _build_lora_configs(self) -> list[LoRAConfig]:
+        if self.lora_r is None or self.lora_r <= 0:
+            raise ValueError("Invalid lora.r in config for lora mode")
+        r = self.lora_r
+        cfg = self.model_config
+        lora_configs: list[LoRAConfig] = []
+        for i in range(cfg.num_layers):
+            for component in ["linear_q", "linear_k", "linear_v", "linear_out"]:
+                b = torch.zeros(cfg.d_model, r, device=self.device)
+                a = torch.zeros(r, cfg.d_model, device=self.device)
+                init_std = 2 / (r + cfg.d_model)
+                torch.nn.init.trunc_normal_(b, mean=0.0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
+                torch.nn.init.trunc_normal_(a, mean=0.0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
+                lora_configs.append(LoRAConfig(f"transformer_layers.{i}.multi_head_attn.{component}", b, a))
+        return lora_configs
 
     def _scan_checkpoints(self) -> list[str]:
         if not os.path.isdir(self.checkpoint_dir):
@@ -284,40 +344,24 @@ class TinyLMService:
         valid.sort(key=sort_key, reverse=True)
         return valid
 
-    def _scan_lora_pairs(self) -> list[dict[str, str]]:
+    def _scan_lora_checkpoints(self) -> list[str]:
         if not self.lora_checkpoint_dir or not os.path.isdir(self.lora_checkpoint_dir):
             return []
 
-        model_map: dict[str, str] = {}
-        lora_map: dict[str, str] = {}
+        checkpoints: list[str] = []
         for dirpath, _, files in os.walk(self.lora_checkpoint_dir):
             for file in files:
-                abs_path = os.path.abspath(os.path.join(dirpath, file))
-                if file.endswith("_model.cpt"):
-                    stem = file[:-10]
-                    model_map[stem] = abs_path
-                elif file.endswith("_lora.cpt"):
-                    stem = file[:-9]
-                    lora_map[stem] = abs_path
+                if file.endswith(".cpt"):
+                    checkpoints.append(os.path.abspath(os.path.join(dirpath, file)))
 
-        stems = sorted(set(model_map.keys()) & set(lora_map.keys()))
-        pairs: list[dict[str, str]] = []
-        for stem in stems:
-            pairs.append(
-                {
-                    "id": stem,
-                    "label": stem,
-                    "model_checkpoint": model_map[stem],
-                    "lora_checkpoint": lora_map[stem],
-                }
-            )
+        def sort_key(path: str) -> tuple[int, float]:
+            base = os.path.splitext(os.path.basename(path))[0]
+            nums = [int(x) for x in base.split("_") if x.isdigit()]
+            step = nums[-1] if nums else -1
+            return (step, os.path.getmtime(path))
 
-        def pair_sort_key(item: dict[str, str]) -> tuple[int, str]:
-            nums = [int(x) for x in item["id"].split("_") if x.isdigit()]
-            return (nums[-1] if nums else -1, item["id"])
-
-        pairs.sort(key=pair_sort_key, reverse=True)
-        return pairs
+        checkpoints.sort(key=sort_key, reverse=True)
+        return checkpoints
 
     def _checkpoint_looks_compatible(self, checkpoint_path: str) -> bool:
         try:
@@ -332,7 +376,7 @@ class TinyLMService:
 
     def checkpoints(self) -> dict[str, Any]:
         ckpts = [p for p in self._scan_checkpoints() if self._checkpoint_looks_compatible(p)]
-        lora_pairs = [p for p in self._scan_lora_pairs() if self._checkpoint_looks_compatible(p["model_checkpoint"])]
+        lora_ckpts = self._scan_lora_checkpoints()
         default_ckpt = None
         if self.train_config.checkpoint and os.path.isfile(self.train_config.checkpoint):
             configured = os.path.abspath(self.train_config.checkpoint)
@@ -340,13 +384,13 @@ class TinyLMService:
                 default_ckpt = configured
         elif ckpts:
             default_ckpt = ckpts[0]
-        default_lora_pair_id = lora_pairs[0]["id"] if lora_pairs else None
+        default_lora_checkpoint = lora_ckpts[0] if lora_ckpts else None
 
         return {
             "config_path": self.config_path,
             "device": self.device,
             "default_checkpoint": default_ckpt,
-            "default_lora_pair_id": default_lora_pair_id,
+            "default_lora_checkpoint": default_lora_checkpoint,
             "checkpoints": [
                 {
                     "path": p,
@@ -354,7 +398,13 @@ class TinyLMService:
                 }
                 for p in ckpts
             ],
-            "lora_pairs": lora_pairs,
+            "lora_checkpoints": [
+                {
+                    "path": p,
+                    "label": os.path.relpath(p, "/root/autodl-tmp/TinyLM"),
+                }
+                for p in lora_ckpts
+            ],
         }
 
     def _ensure_model(self, checkpoint: str, lora_checkpoint: str = "") -> torch.nn.Module:
@@ -368,14 +418,25 @@ class TinyLMService:
             ):
                 return self._loaded.model
 
-            model = init_model_from_checkpoint(self.model_config, checkpoint)
             if lora_checkpoint:
-                lora_configs = load_lora_configs(lora_checkpoint)
-                for cfg in lora_configs:
-                    cfg.b = cfg.b.to(self.device)
-                    cfg.a = cfg.a.to(self.device)
+                base_checkpoint = self.lora_base_model_checkpoint if self.lora_base_model_checkpoint else checkpoint
+                model = init_model_from_checkpoint(self.model_config, base_checkpoint)
+                model = model.to(self.device)
+                lora_configs = self._build_lora_configs()
                 model.adapt_lora(lora_configs)
-            model = model.to(self.device)
+                try:
+                    load_lora_trainable_checkpoint(lora_checkpoint, model)
+                except Exception:
+                    # Backward compatibility for old LoRA checkpoint format.
+                    loaded_lora = load_lora_configs(lora_checkpoint)
+                    loaded_map = {cfg.module_name: cfg for cfg in loaded_lora}
+                    for cfg in lora_configs:
+                        if cfg.module_name in loaded_map:
+                            cfg.b.copy_(loaded_map[cfg.module_name].b.to(cfg.b.device))
+                            cfg.a.copy_(loaded_map[cfg.module_name].a.to(cfg.a.device))
+            else:
+                model = init_model_from_checkpoint(self.model_config, checkpoint)
+                model = model.to(self.device)
             model.eval()
             self._loaded = LoadedModel(checkpoint=checkpoint, lora_checkpoint=lora_checkpoint, model=model)
             return model
@@ -446,11 +507,12 @@ class TinyLMService:
         top_p: float,
         greedy: bool,
         repetition_penalty: float,
-    ) -> str:
+    ) -> dict[str, Any]:
         model = self._ensure_model(checkpoint, lora_checkpoint=lora_checkpoint)
-        token_ids = self._encode_text(prompt)
-        if not token_ids:
+        input_token_ids = self._encode_text(prompt)
+        if not input_token_ids:
             raise ValueError("Prompt encoded to empty token ids")
+        token_ids = list(input_token_ids)
 
         eos_token_id = self._get_eos_token_id()
         kv_cache = TransformerKVCache(self.model_config.num_layers)
@@ -467,7 +529,12 @@ class TinyLMService:
             )
             token_ids.append(next_id)
 
-        return self.tokenizer.decode(token_ids)
+        return {
+            "text": self.tokenizer.decode(token_ids),
+            "input_token_ids": input_token_ids,
+            "output_token_ids": token_ids[len(input_token_ids):],
+            "full_token_ids": token_ids,
+        }
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -508,13 +575,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             checkpoint = str(payload.get("checkpoint", "")).strip()
             mode = str(payload.get("mode", "base")).strip().lower()
-            lora_model_checkpoint = str(payload.get("lora_model_checkpoint", "")).strip()
             lora_checkpoint = str(payload.get("lora_checkpoint", "")).strip()
             prompt = str(payload.get("prompt", ""))
             if mode == "lora":
-                if not lora_model_checkpoint or not lora_checkpoint:
-                    raise ValueError("lora mode requires lora_model_checkpoint and lora_checkpoint")
-                checkpoint = lora_model_checkpoint
+                if not lora_checkpoint:
+                    raise ValueError("lora mode requires lora_checkpoint")
                 prompt = f"<|user|>{prompt}<|assistant|>"
             if not checkpoint:
                 raise ValueError("checkpoint is required")
@@ -528,7 +593,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             repetition_penalty = float(payload.get("repetition_penalty", 1.0))
 
             started = time.time()
-            text = self.service.generate(
+            result = self.service.generate(
                 checkpoint=checkpoint,
                 lora_checkpoint=lora_checkpoint if mode == "lora" else "",
                 prompt=prompt,
@@ -539,7 +604,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 repetition_penalty=repetition_penalty,
             )
             elapsed_sec = time.time() - started
-            self._send_json(HTTPStatus.OK, {"text": text, "elapsed_sec": elapsed_sec})
+            result["elapsed_sec"] = elapsed_sec
+            self._send_json(HTTPStatus.OK, result)
         except Exception as e:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
 

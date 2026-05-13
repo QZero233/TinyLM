@@ -16,12 +16,14 @@ from tiny_lm import (
     cross_entropy_loss,
     gradient_clip,
     init_model_from_checkpoint,
+    init_model,
     init_optimizer,
     load_checkpoint,
     load_lora_configs,
     load_lora_train_config,
+    load_lora_trainable_checkpoint,
     save_checkpoint,
-    save_lora_checkpoint,
+    save_lora_trainable_checkpoint,
 )
 from tiny_lm.model.transformer import Transformer
 from tiny_lm.lora.sft_dataset import SFTJsonlDataset
@@ -29,8 +31,8 @@ from tiny_lm.load_config import get_tokenizer
 
 
 PAIR_FILE_PATTERN = re.compile(r"^epoch_(\d+)_step_(\d+)_(model|lora)\.cpt$")
-TOTAL_LORA_STEPS = 261271
-LORA_WARMUP_STEPS = 7838
+TOTAL_LORA_STEPS = 120000
+LORA_WARMUP_STEPS = 3600
 LORA_LR_MIN = 1e-5
 LORA_LR_MAX = 5e-5
 
@@ -108,13 +110,13 @@ def eval_valid_loss(model: torch.nn.Module, valid_dataloader: DataLoader) -> flo
     return total_loss / max(total_num, 1)
 
 
-def _load_step_from_checkpoint(checkpoint: str) -> int:
-    if not checkpoint:
+def _load_step_from_lora_checkpoint(lora_checkpoint: str) -> int:
+    if not lora_checkpoint:
         return 0
     try:
-        return load_checkpoint(checkpoint, None, None)
+        return load_lora_trainable_checkpoint(lora_checkpoint, model=None)
     except Exception as e:
-        print(f"Warning: failed to load step from checkpoint {checkpoint}: {e}")
+        print(f"Warning: failed to load step from lora checkpoint {lora_checkpoint}: {e}")
         return 0
 
 
@@ -154,6 +156,7 @@ def train_epoch(
     valid_dataloader: DataLoader,
     valid_steps: int,
     checkpoint_save_steps: int,
+    fix_lr: float | None,
     save_root: str,
     epoch: int,
     lora_configs: list[LoRAConfig],
@@ -169,9 +172,12 @@ def train_epoch(
         x = x.cuda()
         y = y.cuda()
 
-        current_lr = _cosine_lr_scheduler_with_floor(
-            global_step, LORA_LR_MAX, LORA_LR_MIN, LORA_WARMUP_STEPS, TOTAL_LORA_STEPS
-        )
+        if fix_lr is not None:
+            current_lr = fix_lr
+        else:
+            current_lr = _cosine_lr_scheduler_with_floor(
+                global_step, LORA_LR_MAX, LORA_LR_MIN, LORA_WARMUP_STEPS, TOTAL_LORA_STEPS
+            )
         for param_group in optimizer.param_groups:
             param_group["lr"] = current_lr
 
@@ -194,11 +200,8 @@ def train_epoch(
             model.train()
 
         if checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
-            model_ckpt = os.path.join(save_root, f"epoch_{epoch}_step_{global_step}_model.cpt")
             lora_ckpt = os.path.join(save_root, f"epoch_{epoch}_step_{global_step}_lora.cpt")
-            save_checkpoint(model, optimizer, global_step, model_ckpt)
-            save_lora_checkpoint(lora_configs, lora_ckpt)
-            print(f"[Checkpoint] Saved model checkpoint: {model_ckpt}")
+            save_lora_trainable_checkpoint(model, global_step, lora_ckpt)
             print(f"[Checkpoint] Saved lora checkpoint: {lora_ckpt}")
             cleanup_old_checkpoint_pairs(save_root, max_keep_pairs=5)
 
@@ -226,26 +229,24 @@ def main():
 
     tokenizer = get_tokenizer(train_config.tokenizer_path)
     tokenizer_vocab_size = _get_tokenizer_vocab_size(tokenizer)
-    # Ensure tokenizer vocab is compatible with the model vocab from config/checkpoint.
-    # If tokenizer is larger, expand embedding; if smaller, fail fast.
-
-    model_checkpoint = lora_train_config.model_checkpoint if lora_train_config.model_checkpoint else None
-    model = init_model_from_checkpoint(config, model_checkpoint)
-    _ensure_model_vocab_compatible(model, tokenizer_vocab_size, lora_train_config.auto_resize_embedding)
-    model = model.to("cuda")
-
     lora_configs = _build_lora_configs(config, lora_train_config.r, "cuda")
+    base_model_checkpoint = lora_train_config.base_model_checkpoint if lora_train_config.base_model_checkpoint else None
     if lora_train_config.lora_checkpoint:
-        loaded_lora = load_lora_configs(lora_train_config.lora_checkpoint)
-        loaded_map = {cfg.module_name: cfg for cfg in loaded_lora}
-        for cfg in lora_configs:
-            if cfg.module_name in loaded_map:
-                cfg.b.copy_(loaded_map[cfg.module_name].b.to(cfg.b.device))
-                cfg.a.copy_(loaded_map[cfg.module_name].a.to(cfg.a.device))
-    model.adapt_lora(lora_configs)
+        model = init_model(config)
+        _ensure_model_vocab_compatible(model, tokenizer_vocab_size, lora_train_config.auto_resize_embedding)
+        model = model.to("cuda")
+        if base_model_checkpoint:
+            load_checkpoint(base_model_checkpoint, model, None)
+        model.adapt_lora(lora_configs)
+        load_lora_trainable_checkpoint(lora_train_config.lora_checkpoint, model)
+    else:
+        model = init_model_from_checkpoint(config, base_model_checkpoint)
+        _ensure_model_vocab_compatible(model, tokenizer_vocab_size, lora_train_config.auto_resize_embedding)
+        model = model.to("cuda")
+        model.adapt_lora(lora_configs)
 
     optimizer = init_optimizer(optimizer_config, model)
-    global_step = _load_step_from_checkpoint(lora_train_config.model_checkpoint) if not optimizer_config.reset else 0
+    global_step = _load_step_from_lora_checkpoint(lora_train_config.lora_checkpoint) if not optimizer_config.reset else 0
     if global_step > TOTAL_LORA_STEPS:
         print(f"[LR] global_step {global_step} exceeds total schedule steps {TOTAL_LORA_STEPS}, lr will stay at {LORA_LR_MIN}")
 
@@ -279,6 +280,7 @@ def main():
             valid_dataloader=valid_dataloader,
             valid_steps=lora_train_config.valid_steps,
             checkpoint_save_steps=lora_train_config.checkpoint_save_steps,
+            fix_lr=lora_train_config.fix_lr,
             save_root=save_root,
             epoch=epoch,
             lora_configs=lora_configs,

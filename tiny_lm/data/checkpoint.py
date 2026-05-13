@@ -29,7 +29,7 @@ def load_checkpoint(src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
             new_state[k.replace("_orig_mod.", "").replace("module.", "")] = v
         state["model"] = new_state
 
-        model.load_state_dict(state["model"], strict=False)
+        model.load_state_dict(state["model"], strict=True)
 
     if optimizer is not None and state["optimizer"] is not None:
         optimizer.load_state_dict(state["optimizer"])

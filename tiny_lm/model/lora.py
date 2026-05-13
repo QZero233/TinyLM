@@ -49,9 +49,49 @@ def save_lora_checkpoint(lora_configs: List[LoRAConfig], save_file: str) -> None
     torch.save(state, save_file)
 
 
+def save_lora_trainable_checkpoint(model: nn.Module, step: int, save_file: str) -> None:
+    os.makedirs(os.path.dirname(save_file), exist_ok=True)
+    trainable_state = {
+        name: param.detach().cpu()
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    }
+    state = {
+        "t": int(step),
+        "trainable_model": trainable_state,
+    }
+    torch.save(state, save_file)
+
+
+def load_lora_trainable_checkpoint(load_file: str, model: nn.Module | None = None) -> int:
+    state = torch.load(load_file, map_location="cpu")
+    step = int(state.get("t", 0))
+    trainable_state = state.get("trainable_model")
+    if model is not None:
+        if not isinstance(trainable_state, dict):
+            raise ValueError(f"Invalid lora trainable checkpoint format: {load_file}")
+        model.load_state_dict(trainable_state, strict=False)
+    return step
+
+
 def load_lora_configs(load_dir: str) -> List[LoRAConfig]:
     if os.path.isfile(load_dir):
         state = torch.load(load_dir, map_location="cpu")
+        if "trainable_model" in state:
+            items = []
+            for key, tensor in state["trainable_model"].items():
+                if key.endswith(".b"):
+                    module_name = key[:-2]
+                    a_key = f"{module_name}.a"
+                    if a_key in state["trainable_model"]:
+                        items.append(
+                            LoRAConfig(
+                                module_name,
+                                state["trainable_model"][key],
+                                state["trainable_model"][a_key],
+                            )
+                        )
+            return items
         items = state.get("lora", [])
         return [LoRAConfig(item["module_name"], item["b"], item["a"]) for item in items]
 
