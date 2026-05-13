@@ -3,6 +3,7 @@ from typing import Optional, Any
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .common import Softmax, Linear
 from .embedding import RoPE
@@ -86,3 +87,36 @@ class MultiHeadAttention(nn.Module):
 
         return self.linear_out(attention_res)
 
+
+class TorchMultiHeadAttention(MultiHeadAttention):
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal_mask: bool = True,
+                rope_token_positions: Optional[torch.IntTensor] = None,
+                kv_cache_state: Optional[KVCacheState] = None) -> torch.Tensor:
+        if kv_cache_state is not None:
+            raise NotImplementedError("TorchMultiHeadAttention does not support kv_cache_state")
+
+        batch_dim_shape = q.shape[:-2]
+        proj_q = self.linear_q(q)
+        proj_k = self.linear_k(k)
+        proj_v = self.linear_v(v)
+
+        qs = proj_q.reshape((*batch_dim_shape, proj_q.shape[-2], self.num_heads, self.d_k)).transpose(-2, -3)
+        ks = proj_k.reshape((*batch_dim_shape, proj_k.shape[-2], self.num_heads, self.d_k)).transpose(-2, -3)
+        vs = proj_v.reshape((*batch_dim_shape, proj_v.shape[-2], self.num_heads, self.d_k)).transpose(-2, -3)
+
+        if self.rope is not None:
+            qs = self.rope(qs, rope_token_positions)
+            ks = self.rope(ks, rope_token_positions)
+
+        attention_res = F.scaled_dot_product_attention(
+            qs,
+            ks,
+            vs,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=causal_mask,
+        )
+
+        attention_res = attention_res.transpose(-2, -3)
+        attention_res = attention_res.reshape((*batch_dim_shape, attention_res.shape[-3], -1))
+        return self.linear_out(attention_res)

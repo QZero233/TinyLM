@@ -7,6 +7,7 @@ import argparse
 import torch
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from tiny_lm import ModelConfig, get_dataset, load_train_config, init_model_from_checkpoint, \
     init_optimizer_from_checkpoint, cross_entropy_loss, gradient_clip, save_checkpoint, cosine_lr_scheduler, \
@@ -14,11 +15,21 @@ from tiny_lm import ModelConfig, get_dataset, load_train_config, init_model_from
 
 MIN_FREE_SPACE_BYTES = 5 * 1024 ** 3
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+TENSORBOARD_ROOT = "/root/tf-logs"
+
+def print_real_update_ratios(model: torch.nn.Module, param_before: dict[str, torch.Tensor]) -> None:
+    for name, param in model.named_parameters():
+        if name not in param_before:
+            continue
+
+        param_after = param.detach()
+        real_update_ratio = (param_after - param_before[name]).norm().item() / (param_after.norm().item() + 1e-12)
+        print(f"[OptimizerUpdateRatio] {name}: {real_update_ratio}")
 
 def _param_estimate(config: ModelConfig) -> None:
     batch = config.batch_size
     vocab, d_model, layers, d_ff = config.vocab_size, config.d_model, config.num_layers, config.d_ff
-    param_fp32_num = 2*vocab*d_model+d_model+layers*(2*d_model+4*d_model**2+3*d_model*d_ff)
+    param_fp32_num = vocab*d_model+d_model+layers*(2*d_model+4*d_model**2+3*d_model*d_ff)
     print(f"Need fp32 param num {param_fp32_num}, memory {4*param_fp32_num/1024**3} GB")
     seq = config.context_length
     train_fp32_num = 4 * param_fp32_num + 2 * batch * seq * vocab + (layers + 2) * batch * seq * d_model
@@ -29,6 +40,37 @@ def _save_checkpoint_with_cleanup(
     optimizer: Optimizer,
     checkpoint_file_path: str,
 ) -> None:
+    def cleanup_excess_checkpoints(max_keep: int = 10):
+        cpt_files: list[str] = []
+        for file_name in os.listdir(checkpoint_root):
+            if file_name.endswith(".cpt"):
+                cpt_files.append(os.path.join(checkpoint_root, file_name))
+
+        if len(cpt_files) < max_keep:
+            return
+
+        def step_key(path: str) -> int:
+            base = os.path.splitext(os.path.basename(path))[0]
+            try:
+                return int(base)
+            except ValueError:
+                return 10 ** 18
+
+        cpt_files.sort(key=step_key)
+        remove_count = len(cpt_files) - max_keep + 1
+        removed: list[str] = []
+        for file_path in cpt_files[:remove_count]:
+            try:
+                os.remove(file_path)
+                removed.append(file_path)
+            except OSError as e:
+                print(f"Skip removing {file_path}, err: {e}")
+        if removed:
+            print(
+                f"Checkpoint count cleanup: removed {len(removed)} old checkpoints "
+                f"before saving new one (max_keep={max_keep})"
+            )
+
     def cleanup_old_checkpoints(protected_file: str | None = None):
         free_space = shutil.disk_usage(checkpoint_root).free
         if free_space >= MIN_FREE_SPACE_BYTES:
@@ -62,6 +104,7 @@ def _save_checkpoint_with_cleanup(
 
     checkpoint_root = os.path.dirname(os.path.normpath(checkpoint_file_path))
     global_step = int(os.path.splitext(os.path.basename(checkpoint_file_path))[0])
+    cleanup_excess_checkpoints(max_keep=10)
     removed, free_space = cleanup_old_checkpoints()
     if removed:
         print(f"Cleanup before save: removed {len(removed)} old checkpoints, free space {free_space / 1024 ** 3:.2f} GB")
@@ -93,46 +136,110 @@ def _save_checkpoint_with_cleanup(
             f"below required {MIN_FREE_SPACE_BYTES / 1024 ** 3:.2f} GB."
         )
 
+def _eval_validation_loss(model: torch.nn.Module, valid_dataloader: DataLoader) -> float:
+    model.eval()
+    total_loss = 0.0
+    total_num = 0
+    for x, y in valid_dataloader:
+        x = x.cuda()
+        y = y.cuda()
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            logits = model(x, None)
+            loss = cross_entropy_loss(logits, y)
+        total_loss += loss.item()
+        total_num += 1
+
+    if total_num == 0:
+        return float("nan")
+    return total_loss / total_num
+
 def train_epoch(dataloader: DataLoader, model: torch.nn.Module, optimizer: Optimizer, checkpoint_dir: str,
-                last_train_step: int, gradient_accumulate: int = 1) -> None:
+                last_train_step: int, gradient_accumulate: int = 1, fix_lr: float | None = None,
+                print_optimizer_update_ratio: bool = False, writer: SummaryWriter | None = None,
+                checkpoint_save_accum_steps: int = 200, valid_dataloader: DataLoader | None = None,
+                valid_steps: int = 200) -> int:
     print("Data loader size: ", len(dataloader))
     n=len(dataloader)
-    total_loss = 0
+    total_loss = 0.0
+    accum_loss = 0.0
+    accum_count = 0
     opt_step = 0
     last_report_time = time.time()
-    for i, (x, y) in enumerate(dataloader):
+    for i, (input_ids, labels) in enumerate(dataloader):
         current_global_step = opt_step + last_train_step
-        lr = cosine_lr_scheduler(current_global_step, 3e-4, 3e-5, 2000, 60000)
+        if fix_lr is not None:
+            lr = fix_lr
+        else:
+            lr = cosine_lr_scheduler(current_global_step, 3e-4, 3e-5, 2000, 60000)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        x = x.cuda()
-        y = y.cuda()
+        input_ids = input_ids.cuda()
+        labels = labels.cuda()
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            logits = model(x, None)
-            loss = cross_entropy_loss(logits, y)
-            loss = loss / gradient_accumulate
+            logits = model(input_ids, None)
+            ce_loss = cross_entropy_loss(logits, labels)
+        loss = ce_loss / gradient_accumulate
 
         loss.backward()
 
-        if (i + 1) % gradient_accumulate == 0:
-            gradient_clip(model.parameters(), m=1)
-            optimizer.step()
-            optimizer.zero_grad()
-            opt_step += 1
+        accum_loss += ce_loss.item()
+        accum_count += 1
 
-        total_loss += loss.cpu().item()
+        current_accum_avg_loss = accum_loss / accum_count if accum_count > 0 else 0.0
 
-        if i % (5 * gradient_accumulate) == 0:
+        if (i+1) % (5 * gradient_accumulate) == 0:
             print(f"({i+1}/{n+1}) Total loss {total_loss * gradient_accumulate}, average loss {total_loss / (i + 1) * gradient_accumulate},"
-                  f" last step loss {loss.cpu().item() * gradient_accumulate}, {time.time() - last_report_time} since last report,"
+                  f" accumulation avg loss {current_accum_avg_loss}, {time.time() - last_report_time} since last report,"
                   f"global step {current_global_step}, lr {lr}")
             last_report_time = time.time()
-        if (i + 1) % 2000 == 0:
+
+        if (i + 1) % gradient_accumulate == 0:
+            param_before = None
+            if print_optimizer_update_ratio and (opt_step + 1) % 10 == 0:
+                param_before = {
+                    name: param.detach().clone()
+                    for name, param in model.named_parameters()
+                }
+            gradient_clip(model.parameters(), m=1)
+            optimizer.step()
+            if param_before is not None:
+                print_real_update_ratios(model, param_before)
+            optimizer.zero_grad()
+            opt_step += 1
+            if writer is not None:
+                current_step = opt_step + last_train_step
+                writer.add_scalar("train/lr_accum_step", lr, current_step)
+                writer.add_scalar("train/loss_accum_step", current_accum_avg_loss, current_step)
+            accum_loss = 0.0
+            accum_count = 0
+
+        total_loss += loss.cpu().item()
+        if (i + 1) % gradient_accumulate == 0 and opt_step > 0 and opt_step % checkpoint_save_accum_steps == 0:
             checkpoint_file_path = os.path.join(checkpoint_dir, f"{current_global_step}.cpt")
             _save_checkpoint_with_cleanup(model, optimizer, checkpoint_file_path)
-            print(f"({i + 1}/{n + 1}) Saved checkpoint at {checkpoint_file_path}")
+            print(
+                f"({i + 1}/{n + 1}) Saved checkpoint at {checkpoint_file_path} "
+                f"(accum_step={opt_step})"
+            )
+
+        if (
+            valid_dataloader is not None
+            and (i + 1) % gradient_accumulate == 0
+            and opt_step > 0
+            and opt_step % valid_steps == 0
+        ):
+            valid_loss = _eval_validation_loss(model, valid_dataloader)
+            if writer is not None:
+                writer.add_scalar("valid/loss_accum_step", valid_loss, current_global_step)
+            print(
+                f"({i + 1}/{n + 1}) Validation average loss {valid_loss} "
+                f"(global_step={current_global_step}, accum_step={opt_step})"
+            )
+            model.train()
+
+    return last_train_step + opt_step
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train TinyLM")
@@ -146,7 +253,8 @@ if __name__ == "__main__":
 
     checkpoint = train_config.checkpoint if train_config.checkpoint else None
     model = init_model_from_checkpoint(config, checkpoint)
-    optimizer, t = init_optimizer_from_checkpoint(optimizer_config, model, checkpoint)
+    optimizer_checkpoint = None if optimizer_config.reset else checkpoint
+    optimizer, t = init_optimizer_from_checkpoint(optimizer_config, model, optimizer_checkpoint)
 
     model.train()
     model.to("cuda")
@@ -157,16 +265,45 @@ if __name__ == "__main__":
             if torch.is_tensor(v):
                 state[k] = v.cuda()
 
+    experiment_dir = os.path.join(train_config.checkpoint_base_dir, train_config.project_name)
+    checkpoint_dir = experiment_dir
+    tensorboard_dir = os.path.join(TENSORBOARD_ROOT, train_config.project_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(tensorboard_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=tensorboard_dir)
+
     dataset = get_dataset(
         train_config.data_dir,
         seq_len=config.context_length,
         zh_token_dtype=train_config.zh_token_dtype,
-        full_random=True
+        full_random=True,
+        train=True,
     )
     dataloader = DataLoader(dataset, batch_size=config.batch_size)
+    valid_dataset = get_dataset(
+        train_config.data_dir,
+        seq_len=config.context_length,
+        zh_token_dtype=train_config.zh_token_dtype,
+        full_random=True,
+        train=False,
+    )
+    valid_dataloader = DataLoader(valid_dataset, batch_size=config.batch_size)
     for i in range(train_config.epochs):
         print(f"Start epoch {i}")
-        checkpoint_dir = os.path.join(train_config.checkpoint_base_dir, f"92M_0_{i}")
-        if not os.path.exists(checkpoint_dir):
-            os.mkdir(checkpoint_dir)
-        train_epoch(dataloader, model, optimizer, checkpoint_dir, t, train_config.gradient_accumulate)
+        t = train_epoch(
+            dataloader,
+            model,
+            optimizer,
+            checkpoint_dir,
+            t,
+            train_config.gradient_accumulate,
+            train_config.fix_lr,
+            train_config.print_optimizer_update_ratio,
+            writer,
+            train_config.checkpoint_save_accum_steps,
+            valid_dataloader,
+            train_config.valid_steps,
+        )
+        if hasattr(dataset, "reset"):
+            dataset.reset()
+    writer.close()

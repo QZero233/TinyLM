@@ -1,26 +1,39 @@
 import math
-from typing import Any, Optional, List, Tuple
+from typing import Any, Optional, List
 
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .norm import RMSNorm
-from .attention import MultiHeadAttention
-from .common import SwiGLU, Linear
+from .attention import MultiHeadAttention, TorchMultiHeadAttention
+from .common import SwiGLU, TorchSwiGLU
 from .embedding import Embedding
 from .kv_cache import KVCacheState, TransformerKVCache
 from .lora import LoRALinear, LoRAConfig
 from .utils import replace_submodule
 
+def _build_attention(d_model: int, num_heads: int, max_seq_len: int, theta: float,
+                     pytorch_impl: bool) -> nn.Module:
+    if pytorch_impl:
+        return TorchMultiHeadAttention(d_model, num_heads, max_seq_len, theta)
+    return MultiHeadAttention(d_model, num_heads, max_seq_len, theta)
+
+
+def _build_ffn(d_model: int, d_ff: int, pytorch_impl: bool) -> nn.Module:
+    if pytorch_impl:
+        return TorchSwiGLU(d_model, d_ff)
+    return SwiGLU(d_model, d_ff)
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int = 1024,
-                 theta: float = 0.5, *args: Any, **kwargs: Any):
+                 theta: float = 0.5, pytorch_impl: bool = False, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
-        self.multi_head_attn = MultiHeadAttention(d_model, num_heads, max_seq_len, theta)
-        self.ff = SwiGLU(d_model, d_ff)
+        self.multi_head_attn = _build_attention(d_model, num_heads, max_seq_len, theta, pytorch_impl)
+        self.ff = _build_ffn(d_model, d_ff, pytorch_impl)
 
     def forward(self, x: torch.Tensor, kv_cache_state: Optional[KVCacheState] = None) -> torch.Tensor:
         # Input: (batch_size, seq_len, d_model)
@@ -33,18 +46,24 @@ class TransformerBlock(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, vocab_size: int, context_length: int, num_layers: int, d_model: int,
                  num_heads: int, d_ff: int,
-                 theta: float = 0.5, gradient_checkpoint: bool = True,
+                 theta: float = 0.5, gradient_checkpoint: bool = True, pytorch_impl: bool = False,
                  *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.gradient_checkpoint = gradient_checkpoint
+        self.pytorch_impl = pytorch_impl
 
-        self.transformer_layers = nn.ModuleList([TransformerBlock(d_model, num_heads, d_ff, context_length,theta) for _ in range(num_layers)])
+        self.transformer_layers = nn.ModuleList(
+            [TransformerBlock(d_model, num_heads, d_ff, context_length, theta, pytorch_impl) for _ in range(num_layers)]
+        )
         self.embedding = Embedding(vocab_size, d_model)
         self.norm = RMSNorm(d_model)
 
     def forward(self, x: torch.Tensor, kv_cache: Optional[TransformerKVCache]=None) -> torch.Tensor:
         # Input: (batch_size, seq_len)
         # Output: (batch_size, seq_len, vocab_size)
+        if self.pytorch_impl and kv_cache is not None:
+            raise NotImplementedError("pytorch_impl=True does not support kv_cache")
+
         if kv_cache is not None:
             cached_len = len(kv_cache)
             x = x[..., cached_len:]
@@ -70,12 +89,6 @@ class Transformer(nn.Module):
         new_embedding_weight[:origin_vocab_size, :] = self.embedding.embedding_matrix
         self.embedding.embedding_matrix = nn.Parameter(new_embedding_weight)
 
-        new_linear_weight = torch.empty((new_size, d_model))
-        init_std = 2 / (d_model + new_size)
-        nn.init.trunc_normal_(new_linear_weight, mean=0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
-        new_linear_weight[:origin_vocab_size, :] = self.linear.weights
-        self.linear.weights = nn.Parameter(new_linear_weight)
-
     def _freeze_params(self):
         for param in self.parameters():
             param.requires_grad = False
@@ -89,4 +102,3 @@ class Transformer(nn.Module):
             lora_linear.b.requires_grad = True
             lora_linear.a.requires_grad = True
             replace_submodule(self, config.module_name, lora_linear)
-

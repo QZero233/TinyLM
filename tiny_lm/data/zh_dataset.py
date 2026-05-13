@@ -16,40 +16,81 @@ class _ShardInfo:
 
 
 class TinyLMZhDataset(Dataset):
-    def __init__(self, data_dir: str, seq_len: int, dtype: str = "uint16", full_random: bool = True):
+    def __init__(self, data_dir: str, seq_len: int, dtype: str = "uint16",
+                 full_random: bool = True, train: bool = True):
         self.shards: List[_ShardInfo] = []
         self.seq_len = seq_len
         self.dtype = np.dtype(dtype)
         self.full_random = full_random
+        self.train = train
         self._memmap_cache: dict[int, np.memmap] = {}
         self._cumulative_sample_ends: List[int] = []
+        self._group_size = self.seq_len + 1
+        self._index_map: List[int] = []
+        self._epoch_offset = 0
+        self._valid_max_samples = 500
+        self._valid_selected_shard_idx: int | None = None
 
-        total_samples = 0
+        shard_candidates: List[_ShardInfo] = []
         for root, _, files in os.walk(data_dir):
             for file in sorted(files):
                 if file.endswith(".bin"):
                     path = os.path.join(root, file)
                     token_count = os.path.getsize(path) // self.dtype.itemsize
-                    sample_count = token_count - seq_len
+                    if self.full_random:
+                        # Random mode: sample one non-overlapping group with size (seq_len + 1).
+                        sample_count = token_count // self._group_size
+                    else:
+                        # Deterministic mode keeps the original sliding-window behavior.
+                        sample_count = token_count - seq_len
                     if sample_count > 0:
-                        self.shards.append(
-                            _ShardInfo(path=path, token_count=token_count, sample_count=sample_count)
-                        )
-                        total_samples += sample_count
-                        self._cumulative_sample_ends.append(total_samples)
+                        shard_candidates.append(_ShardInfo(path=path, token_count=token_count, sample_count=sample_count))
 
-        if not self.shards:
+        if not shard_candidates:
             raise ValueError(f"No usable .bin token files found in {data_dir}")
 
+        if self.train:
+            self.shards = shard_candidates
+            for shard in self.shards:
+                self._cumulative_sample_ends.append(
+                    (self._cumulative_sample_ends[-1] if self._cumulative_sample_ends else 0) + shard.sample_count
+                )
+            total_samples = self._cumulative_sample_ends[-1]
+        else:
+            selected_shard = random.choice(shard_candidates)
+            self.shards = [selected_shard]
+            self._valid_selected_shard_idx = shard_candidates.index(selected_shard)
+            total_samples = min(self._valid_max_samples, selected_shard.sample_count)
+            self.shards[0] = _ShardInfo(
+                path=selected_shard.path,
+                token_count=selected_shard.token_count,
+                sample_count=total_samples,
+            )
+            self._cumulative_sample_ends = [total_samples]
+
         self.total_samples = total_samples
+        if self.full_random:
+            if self.train:
+                self.reset()
+            else:
+                self._index_map = list(range(self.total_samples))
+                random.shuffle(self._index_map)
+                self._epoch_offset = random.randint(0, self.seq_len)
 
     def __len__(self) -> int:
         return self.total_samples
 
+    def reset(self):
+        if not self.full_random or not self.train:
+            return
+        self._index_map = list(range(self.total_samples))
+        random.shuffle(self._index_map)
+        self._epoch_offset = random.randint(0, self.seq_len)
+
     def _map_index(self, idx: int) -> int:
-        if not self.full_random or self.total_samples <= 1:
+        if not self.full_random:
             return idx
-        return random.randrange(self.total_samples)
+        return self._index_map[idx]
 
     def _get_memmap(self, shard_idx: int) -> np.memmap:
         memmap = self._memmap_cache.get(shard_idx)
@@ -73,7 +114,15 @@ class TinyLMZhDataset(Dataset):
         shard = self.shards[shard_idx]
         assert shard_offset < shard.sample_count
 
-        x = target_batch[shard_offset:shard_offset + self.seq_len].astype(np.int64)
-        y = target_batch[shard_offset + 1:shard_offset + self.seq_len + 1].astype(np.int64)
+        if self.full_random:
+            start = shard_offset * self._group_size + self._epoch_offset
+            max_start = shard.token_count - self._group_size
+            if start > max_start:
+                start %= (max_start + 1)
+        else:
+            start = shard_offset
+
+        x = target_batch[start:start + self.seq_len].astype(np.int64)
+        y = target_batch[start + 1:start + self.seq_len + 1].astype(np.int64)
 
         return torch.LongTensor(x), torch.LongTensor(y)

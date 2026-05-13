@@ -19,7 +19,7 @@ from tiny_lm import (
 )
 
 
-device = "cuda"
+device = "cpu"
 TokenizerT = TokenizersBackend | SentencePieceBackend
 
 
@@ -37,7 +37,7 @@ def _apply_repetition_penalty(logits: torch.Tensor, input_token_ids: List[int], 
 def _predict_next_token(
     input_token_ids: List[int],
     model: torch.nn.Module,
-    temperature: float = 0.9,
+    temperature: float = 1,
     top_p: float = 0.9,
     greedy: bool = False,
     repetition_penalty: float = 1.0,
@@ -125,6 +125,7 @@ def _auto_regression(
     model: torch.nn.Module,
     tokenizer: TokenizerT,
     repetition_penalty: float = 1.0,
+    greedy: bool = False,
     kv_cache: Optional[TransformerKVCache] = None,
 ) -> str:
     token_ids = _encode_text(tokenizer, prompt)
@@ -135,6 +136,7 @@ def _auto_regression(
         next_id = _predict_next_token(
             token_ids,
             model,
+            greedy=greedy,
             repetition_penalty=repetition_penalty,
             kv_cache=kv_cache,
         )
@@ -183,9 +185,11 @@ if __name__ == "__main__":
     parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--eval_batch_size", type=int, default=32)
     parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--greedy", action="store_true")
     args = parser.parse_args()
 
     train_config, config, _ = load_train_config(args.config)
+    config.pytorch_impl = False
     tokenizer = get_tokenizer(train_config.tokenizer_path)
 
     checkpoint = args.checkpoint if args.checkpoint is not None else train_config.checkpoint
@@ -204,6 +208,7 @@ if __name__ == "__main__":
                 model=model,
                 tokenizer=tokenizer,
                 repetition_penalty=args.repetition_penalty,
+                greedy=args.greedy,
                 kv_cache=kv_cache,
             )
         )

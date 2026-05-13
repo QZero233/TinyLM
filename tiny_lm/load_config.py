@@ -15,6 +15,7 @@ DEFAULT_TRAIN_CONFIG = "/root/autodl-tmp/TinyLM/configs/train_zh.json"
 
 @dataclass
 class TrainConfig:
+    project_name: str
     tokenizer_path: str
     checkpoint: str
     data_dir: str
@@ -22,6 +23,10 @@ class TrainConfig:
     checkpoint_base_dir: str
     epochs: int
     gradient_accumulate: int
+    checkpoint_save_accum_steps: int = 200
+    valid_steps: int = 200
+    fix_lr: float | None = None
+    print_optimizer_update_ratio: bool = False
 
 
 def get_tokenizer(tokenizer_path: str) -> TokenizersBackend | SentencePieceBackend:
@@ -33,12 +38,13 @@ def load_tokenizer(tokenizer_path: str) -> TokenizersBackend | SentencePieceBack
 
 
 def get_dataset(data_dir: str, seq_len: int, zh_token_dtype: str = "uint16",
-                full_random: bool = True) -> TinyLMZhDataset:
+                full_random: bool = True, train: bool = True) -> TinyLMZhDataset:
     return TinyLMZhDataset(
         data_dir=data_dir,
         seq_len=seq_len,
         dtype=zh_token_dtype,
         full_random=full_random,
+        train=train,
     )
 
 

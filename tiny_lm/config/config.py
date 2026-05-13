@@ -12,6 +12,7 @@ class ModelConfig:
     theta: float = 10000
     gradient_checkpoint: bool = True
     batch_size: int = 16
+    pytorch_impl: bool = False
 
 
 @dataclass
@@ -21,6 +22,7 @@ class OptimizerConfig:
     beta_2: float = 0.95
     weight_decay: float = 0.1
     eps: float = 1e-6
+    reset: bool = False
 
 
 def get_default_model_config(vocab_size: int) -> ModelConfig:

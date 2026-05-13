@@ -17,7 +17,9 @@ def save_checkpoint(model: torch.nn.Module, optimizer: typing.Optional[torch.opt
 
 def load_checkpoint(src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
                     model: typing.Optional[torch.nn.Module], optimizer: typing.Optional[torch.optim.Optimizer]) -> int:
-    state = torch.load(src)
+    # Always load checkpoint tensors onto CPU first. This avoids unexpected
+    # CUDA allocations when a checkpoint was saved from GPU training.
+    state = torch.load(src, map_location="cpu")
 
     # 处理Compiled的模型参数前缀
     if model is not None:
@@ -32,4 +34,3 @@ def load_checkpoint(src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
     if optimizer is not None and state["optimizer"] is not None:
         optimizer.load_state_dict(state["optimizer"])
     return state["t"]
-

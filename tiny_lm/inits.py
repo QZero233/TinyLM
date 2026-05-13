@@ -18,6 +18,7 @@ def init_model(config: ModelConfig) -> torch.nn.Module:
         config.d_ff,
         config.theta,
         gradient_checkpoint=config.gradient_checkpoint,
+        pytorch_impl=config.pytorch_impl,
     )
 
 

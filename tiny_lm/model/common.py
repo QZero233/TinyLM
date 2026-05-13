@@ -3,6 +3,7 @@ from typing import Any, Optional
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 class Linear(nn.Module):
     def __init__(self, in_features, out_features, *args, **kwargs):
@@ -52,6 +53,13 @@ class SwiGLU(nn.Module):
         tmp3 = tmp1 * tmp2
         return tmp3 @ self.W2.T
 
+
+class TorchSwiGLU(SwiGLU):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = F.silu(F.linear(x, self.W1))
+        value = F.linear(x, self.W3)
+        return F.linear(gate * value, self.W2)
+
 class Softmax(nn.Module):
     def forward(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
         max_val, _ = torch.max(x, dim=dim, keepdim=True)
@@ -59,4 +67,3 @@ class Softmax(nn.Module):
         x_exp = torch.exp(x)
         x_exp_sum = torch.sum(x_exp, dim=dim, keepdim=True)
         return x_exp / x_exp_sum
-

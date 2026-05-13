@@ -18,6 +18,7 @@ dependencies = [
     "torch~=2.11.0",
     "transformers>=4.57",
     "tqdm>=4.67",
+    "tensorboard>=2.20",
     "wandb>=0.25",
     "ty>=0.0.26",
     "ruff>=0.15.8"
