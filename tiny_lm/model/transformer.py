@@ -82,15 +82,26 @@ class Transformer(nn.Module):
 
     def resize_embedding(self, new_size: int):
         origin_vocab_size, d_model = self.embedding.embedding_matrix.shape
-        assert new_size > origin_vocab_size
+        if new_size == origin_vocab_size:
+            return
 
-        new_embedding_weight = torch.empty((new_size, d_model))
-        nn.init.trunc_normal_(new_embedding_weight, mean=0, std=1, a=-3, b=3)
-        new_embedding_weight[:origin_vocab_size, :] = self.embedding.embedding_matrix
+        old_embedding_weight = self.embedding.embedding_matrix
+        new_embedding_weight = torch.empty(
+            (new_size, d_model),
+            device=old_embedding_weight.device,
+            dtype=old_embedding_weight.dtype,
+        )
+        keep_size = min(origin_vocab_size, new_size)
+        new_embedding_weight[:keep_size, :] = old_embedding_weight[:keep_size, :]
+        if new_size > origin_vocab_size:
+            nn.init.trunc_normal_(new_embedding_weight[origin_vocab_size:, :], mean=0, std=1, a=-3, b=3)
         self.embedding.embedding_matrix = nn.Parameter(new_embedding_weight)
+        self.embedding.num_embeddings = new_size
 
     def _freeze_params(self):
-        for param in self.parameters():
+        for name, param in self.named_parameters():
+            if name.startswith("embedding."):
+                continue
             param.requires_grad = False
 
     def adapt_lora(self, lora_configs: List[LoRAConfig]):

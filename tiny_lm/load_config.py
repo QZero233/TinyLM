@@ -4,7 +4,6 @@ from typing import Any, TypeVar
 from typing import Tuple
 
 from transformers import AutoTokenizer
-from transformers import SentencePieceBackend, TokenizersBackend
 
 from .config import ModelConfig, OptimizerConfig
 from .data.zh_dataset import TinyLMZhDataset
@@ -29,11 +28,23 @@ class TrainConfig:
     print_optimizer_update_ratio: bool = False
 
 
-def get_tokenizer(tokenizer_path: str) -> TokenizersBackend | SentencePieceBackend:
+@dataclass
+class LoraTrainConfig:
+    r: int
+    checkpoint_base_dir: str
+    data_dir: str
+    model_checkpoint: str
+    lora_checkpoint: str = ""
+    auto_resize_embedding: bool = True
+    valid_steps: int = 200
+    checkpoint_save_steps: int = 200
+
+
+def get_tokenizer(tokenizer_path: str) -> Any:
     return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
 
-def load_tokenizer(tokenizer_path: str) -> TokenizersBackend | SentencePieceBackend:
+def load_tokenizer(tokenizer_path: str) -> Any:
     return get_tokenizer(tokenizer_path)
 
 
@@ -46,11 +57,6 @@ def get_dataset(data_dir: str, seq_len: int, zh_token_dtype: str = "uint16",
         full_random=full_random,
         train=train,
     )
-
-
-def get_tokenizer_vocab_size(tokenizer_path: str) -> int:
-    tokenizer = get_tokenizer(tokenizer_path)
-    return len(tokenizer)
 
 
 DataclassT = TypeVar("DataclassT")
@@ -95,13 +101,29 @@ def load_train_config(config_file: str) -> Tuple[TrainConfig, ModelConfig, Optim
     training_values = _get_required_section(raw_config, "training")
     model_values = _get_required_section(raw_config, "model")
     optimizer_values = _get_required_section(raw_config, "optimizer")
-    train_config = _build_dataclass(TrainConfig, training_values, "training")
+    training_core_values = dict(training_values)
+    training_core_values.pop("lora", None)
+    train_config = _build_dataclass(TrainConfig, training_core_values, "training")
 
     if train_config.zh_token_dtype not in ("uint16", "uint32", "int32", "int64"):
         raise ValueError("training.zh_token_dtype must be one of: uint16, uint32, int32, int64")
 
-    vocab_size = get_tokenizer_vocab_size(train_config.tokenizer_path)
-    model_config = _build_dataclass(ModelConfig, model_values, "model", extra_values={"vocab_size": vocab_size})
+    model_config = _build_dataclass(ModelConfig, model_values, "model")
     optimizer_config = _build_dataclass(OptimizerConfig, optimizer_values, "optimizer")
 
     return train_config, model_config, optimizer_config
+
+
+def load_lora_train_config(config_file: str) -> Tuple[TrainConfig, ModelConfig, OptimizerConfig, LoraTrainConfig]:
+    train_config, model_config, optimizer_config = load_train_config(config_file)
+    with open(config_file, "r") as f:
+        raw_config = json.load(f)
+
+    training_values = _get_required_section(raw_config, "training")
+    lora_values = _get_required_section(training_values, "lora")
+    lora_config = _build_dataclass(LoraTrainConfig, lora_values, "training.lora")
+    if lora_config.r <= 0:
+        raise ValueError("training.lora.r must be > 0")
+    if not lora_config.model_checkpoint:
+        raise ValueError("training.lora.model_checkpoint must not be empty")
+    return train_config, model_config, optimizer_config, lora_config

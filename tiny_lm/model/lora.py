@@ -34,7 +34,27 @@ def save_lora_configs(lora_configs: List[LoRAConfig], save_dir: str) -> None:
         json.dump(manifest, f, ensure_ascii=True, indent=2)
 
 
+def save_lora_checkpoint(lora_configs: List[LoRAConfig], save_file: str) -> None:
+    os.makedirs(os.path.dirname(save_file), exist_ok=True)
+    state = {
+        "lora": [
+            {
+                "module_name": cfg.module_name,
+                "b": cfg.b.detach().cpu(),
+                "a": cfg.a.detach().cpu(),
+            }
+            for cfg in lora_configs
+        ]
+    }
+    torch.save(state, save_file)
+
+
 def load_lora_configs(load_dir: str) -> List[LoRAConfig]:
+    if os.path.isfile(load_dir):
+        state = torch.load(load_dir, map_location="cpu")
+        items = state.get("lora", [])
+        return [LoRAConfig(item["module_name"], item["b"], item["a"]) for item in items]
+
     manifest_file = os.path.join(load_dir, "lora_manifest.json")
     with open(manifest_file, "r", encoding="utf-8") as f:
         manifest = json.load(f)

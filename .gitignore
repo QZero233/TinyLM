@@ -40,3 +40,4 @@ Thumbs.db
 /test/
 /checkpoint_train/
 /lab/
+/checkpoint_lora/

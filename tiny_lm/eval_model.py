@@ -1,10 +1,9 @@
 import argparse
 import random
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import SentencePieceBackend, TokenizersBackend
 
 from tiny_lm import (
     DEFAULT_TRAIN_CONFIG,
@@ -20,7 +19,7 @@ from tiny_lm import (
 
 
 device = "cpu"
-TokenizerT = TokenizersBackend | SentencePieceBackend
+TokenizerT = Any
 
 
 def _apply_repetition_penalty(logits: torch.Tensor, input_token_ids: List[int], repetition_penalty: float) -> torch.Tensor:
@@ -81,41 +80,13 @@ def _predict_next_token(
 
 
 def _encode_text(tokenizer: TokenizerT, text: str) -> List[int]:
-    if hasattr(tokenizer, "tokenizer") and hasattr(tokenizer.tokenizer, "encode"):
-        try:
-            return tokenizer.tokenizer.encode(text, bos=False, eos=False)
-        except TypeError:
-            return tokenizer.tokenizer.encode(text)
-
-    if hasattr(tokenizer, "sp_model") and hasattr(tokenizer.sp_model, "encode"):
-        return tokenizer.sp_model.encode(text)
-
-    if hasattr(tokenizer, "encode"):
-        try:
-            return tokenizer.encode(text, add_special_tokens=False)
-        except TypeError:
-            return tokenizer.encode(text)
-
-    encoded = tokenizer(text, add_special_tokens=False)
-    return encoded["input_ids"]
+    return tokenizer.encode(text, add_special_tokens=False)
 
 
 def _get_eos_token_id(tokenizer: TokenizerT) -> Optional[int]:
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     if eos_token_id is not None:
-        return eos_token_id
-
-    if hasattr(tokenizer, "eos_id"):
-        return tokenizer.eos_id
-
-    if hasattr(tokenizer, "encode"):
-        try:
-            eos_ids = _encode_text(tokenizer, "<|endoftext|>")
-        except Exception:
-            eos_ids = []
-        if len(eos_ids) == 1:
-            return eos_ids[0]
-
+        return int(eos_token_id)
     return None
 
 
