@@ -27,11 +27,30 @@ TinyLM 是一个从零实现的 Transformer 语言模型项目，基于 **PyTorc
 
 > 旧版 305M 英文模型的代码已归档至 `legacy_305M` 分支。
 
-## 数据准备
+### 项目亮点
 
-### 下载预训练数据
+- 从零实现 Transformer 核心模块（多头注意力、RoPE、RMSNorm、SwiGLU）
+- 完整的预训练 + SFT + LoRA 微调流程
+- 推理阶段 KV Cache 增量解码
+- 统一的 JSON 配置文件管理所有训练参数
+- 基于 `uv` 的简洁运行方式
 
-预训练数据为百度百科和中文维基百科的 tokenized `.bin` 文件，从 ModelScope 下载：
+### 项目来源
+
+本项目代码来源于 **Stanford CS336 Assignment 1**，在原开源协议前提下进行了结构调整与功能扩展。
+
+- GitHub：https://github.com/QZero233/TinyLM
+- ModelScope（权重与数据）：https://www.modelscope.cn/models/QZero233/tiny_lm
+
+---
+
+## 快速启动
+
+### 1. 下载与准备数据
+
+#### 预训练数据
+
+从 ModelScope 下载 tokenized `.bin` 文件：
 
 https://www.modelscope.cn/datasets/wdndev/tiny_llm_dataset
 
@@ -56,129 +75,99 @@ data/
     └── ...
 ```
 
-### 下载 SFT 数据
+#### SFT 数据
 
-在同一数据集页面下载 SFT 用的 JSONL 文件，放入 `data/sft_data/` 目录。每行格式为：
+在同一数据集页面下载 JSONL 文件，放入 `data/sft_data/` 目录。每行格式：
 
 ```json
 {"question": "...", "answer": "..."}
 ```
 
-### 分词器
+#### 分词器
 
-使用 ChatGLM3 的 BPE 分词器，已包含在 `data/chatglm3_tokenizer/` 目录中。
+ChatGLM3 BPE 分词器已包含在 `data/chatglm3_tokenizer/` 中。
 
-## 环境准备
+#### 环境
 
 ```bash
 uv sync
 ```
 
+### 2. 预训练
+
+预训练参数已在 `configs/train_zh.json` 中配置好，一条命令启动：
+
+```bash
+uv run tiny_lm/train_model.py
+```
+
+从 checkpoint 恢复训练：修改 JSON 中的 `checkpoint` 字段指向已有的 `.cpt` 文件：
+
+```json
+{
+  "training": {
+    "checkpoint": "/path/to/checkpoint.cpt"
+  }
+}
+```
+
+### 3. 指令微调
+
+微调同样通过 JSON 配置。需要先设置预训练 base checkpoint 路径：
+
+```json
+{
+  "training": {
+    "lora": {
+      "base_model_checkpoint": "/path/to/pretrained_checkpoint.cpt",
+      "full_finetune": true
+    }
+  }
+}
+```
+
+然后一条命令启动：
+
+```bash
+uv run tiny_lm/lora/lora_fine_tuning.py
+```
+
+通过 `full_finetune` 切换全量微调和 LoRA：
+
+| `full_finetune` | 模式 |
+|:---:|------|
+| `true` | 全量微调（SFT，推荐） |
+| `false` | LoRA 微调 |
+
+从 checkpoint 恢复：设置 `lora.lora_checkpoint` 指向已有 checkpoint 即可。
+
+> 配置文件说明详见 [CONFIG.md](./CONFIG.md#traininglora--lora-sft-子配置)。
+
+### 4. 推理
+
+#### WebUI（浏览器界面）
+
+```bash
+uv run webui/app.py --config configs/train_zh.json --port 6008
+```
+
+#### 命令行生成
+
+```bash
+uv run tiny_lm/eval_model.py --config configs/train_zh.json --prompt "中国的首都是" --max_seq_len 256
+```
+
+#### 验证集 loss
+
+```bash
+uv run tiny_lm/eval_model.py --config configs/train_zh.json --mode valid_loss
+```
+
+---
+
 ## 配置文件
 
 所有训练参数通过 JSON 配置文件管理。详见 [CONFIG.md](./CONFIG.md)。
-
-默认配置：`configs/train_zh.json`。各字段含义详见 [CONFIG.md](./CONFIG.md)。
-
-## 预训练
-
-预训练参数已在 JSON 中配置好，直接启动即可：
-
-```bash
-uv run python -m tiny_lm.train_model --config configs/train_zh.json
-```
-
-### 从 Checkpoint 恢复训练
-
-修改 JSON 中的 `checkpoint` 字段指向已有的 `.cpt` 文件：
-
-```json
-{
-  "training": {
-    "checkpoint": "/path/to/checkpoint.cpt",
-    ...
-  }
-}
-```
-
-> 传入空字符串或不存在的路径时从随机初始化开始。
-
-## 指令微调
-
-微调同样通过 JSON 配置，使用 `lora` 子节控制微调参数。通过 `full_finetune` 字段切换全量微调和 LoRA：
-
-```json
-{
-  "training": {
-    "lora": {
-      "full_finetune": true,
-      "base_model_checkpoint": "/path/to/pretrained_checkpoint.cpt",
-      ...
-    }
-  }
-}
-```
-
-### 全量微调（SFT）
-
-```bash
-uv run python -m tiny_lm.lora.lora_fine_tuning --config configs/train_zh.json
-```
-
-需要设置：
-- `lora.full_finetune: true`
-- `lora.base_model_checkpoint`：指向预训练 checkpoint
-- `lora.data_dir`：SFT 数据目录（JSONL 文件所在目录）
-
-### LoRA 微调
-
-同样一条命令，切换 `full_finetune` 即可：
-
-```json
-{
-  "training": {
-    "lora": {
-      "full_finetune": false,
-      "r": 8,
-      ...
-    }
-  }
-}
-```
-
-```bash
-uv run python -m tiny_lm.lora.lora_fine_tuning --config configs/train_zh.json
-```
-
-> **注意**：LoRA 效果通常不如全量微调，推荐优先使用全量微调。LoRA 模式下学习率建议设为全量的 1/10～1/100。
-
-### 从 Checkpoint 恢复微调
-
-全量微调恢复：设置 `lora.lora_checkpoint` 指向已有的 SFT checkpoint。
-
-LoRA 恢复：同样设置 `lora.lora_checkpoint` 指向已有的 LoRA checkpoint（需要配套设置 `lora.base_model_checkpoint`）。
-
-## 生成与评估
-
-使用 `eval_model.py` 进行文本生成或验证集 loss 评估：
-
-```bash
-# 文本生成
-uv run python -m tiny_lm.eval_model --config configs/train_zh.json --prompt "中国的首都是" --max_seq_len 256
-
-# 验证集 loss
-uv run python -m tiny_lm.eval_model --config configs/train_zh.json --mode valid_loss
-```
-
-## WebUI
-
-提供浏览器交互界面：
-
-```bash
-uv run python webui/app.py --config configs/train_zh.json --port 6008
-```
-
-支持 base checkpoint 和 LoRA checkpoint 两种模式。
 
 ## 分布式训练
 
@@ -186,17 +175,6 @@ uv run python webui/app.py --config configs/train_zh.json --port 6008
 
 分布式训练代码位于 `tiny_lm/dist_train/`，尚未适配当前版本。
 
-## 项目亮点
+## 许可证
 
-- 从零实现 Transformer 核心模块（多头注意力、RoPE、RMSNorm、SwiGLU）
-- 完整的预训练 + SFT + LoRA 微调流程
-- 推理阶段 KV Cache 增量解码
-- 统一的 JSON 配置文件管理所有训练参数
-- 基于 `uv` 的简洁运行方式
-
-## 项目来源
-
-本项目代码来源于 **Stanford CS336 Assignment 1**，在原开源协议前提下进行了结构调整与功能扩展。
-
-- GitHub：https://github.com/QZero233/TinyLM
-- ModelScope（权重与数据）：https://www.modelscope.cn/models/QZero233/tiny_lm
+详见 [LICENSE](./LICENSE)。
