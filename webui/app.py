@@ -1,8 +1,6 @@
 import argparse
 import json
-import math
 import os
-import random
 import threading
 import time
 from dataclasses import dataclass
@@ -15,14 +13,14 @@ from typing import Any, Optional
 import torch
 
 from tiny_lm import (
-    LoRAConfig,
     get_tokenizer,
     init_model,
-    init_model_from_checkpoint,
     load_checkpoint,
-    load_lora_configs,
-    load_lora_trainable_checkpoint,
     load_train_config,
+)
+from tiny_lm.eval_model import (
+    generate as eval_generate,
+    load_model_for_inference,
 )
 
 
@@ -292,7 +290,6 @@ class TinyLMService:
         self.config_path = os.path.abspath(config_path)
         self.device = device
         self.train_config, self.model_config, _ = load_train_config(self.config_path)
-        self.model_config.pytorch_impl = False
         self.tokenizer = get_tokenizer(self.train_config.tokenizer_path)
         self.checkpoint_dir = os.path.abspath(
             os.path.join(self.train_config.checkpoint_base_dir, self.train_config.project_name)
@@ -317,22 +314,6 @@ class TinyLMService:
             self.lora_full_finetune = bool(lora_cfg.get("full_finetune", False))
         self._model_lock = threading.Lock()
         self._loaded: Optional[LoadedModel] = None
-
-    def _build_lora_configs(self) -> list[LoRAConfig]:
-        if self.lora_r is None or self.lora_r <= 0:
-            raise ValueError("Invalid lora.r in config for lora mode")
-        r = self.lora_r
-        cfg = self.model_config
-        lora_configs: list[LoRAConfig] = []
-        for i in range(cfg.num_layers):
-            for component in ["linear_q", "linear_k", "linear_v", "linear_out"]:
-                b = torch.zeros(cfg.d_model, r, device=self.device)
-                a = torch.zeros(r, cfg.d_model, device=self.device)
-                init_std = 2 / (r + cfg.d_model)
-                torch.nn.init.trunc_normal_(b, mean=0.0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
-                torch.nn.init.trunc_normal_(a, mean=0.0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
-                lora_configs.append(LoRAConfig(f"transformer_layers.{i}.multi_head_attn.{component}", b, a))
-        return lora_configs
 
     def _scan_checkpoints(self) -> list[str]:
         if not os.path.isdir(self.checkpoint_dir):
@@ -415,91 +396,18 @@ class TinyLMService:
             ):
                 return self._loaded.model
 
-            if lora_checkpoint:
-                if self.lora_full_finetune:
-                    # In full_finetune mode, lora checkpoint is a full model checkpoint.
-                    model = init_model(self.model_config)
-                    load_checkpoint(lora_checkpoint, model, None)
-                    model = model.to(self.device)
-                else:
-                    model = init_model_from_checkpoint(self.model_config, self.lora_base_model_checkpoint)
-                    model = model.to(self.device)
-                    lora_configs = self._build_lora_configs()
-                    model.adapt_lora(lora_configs)
-                    try:
-                        load_lora_trainable_checkpoint(lora_checkpoint, model)
-                    except Exception:
-                        # Backward compatibility for old LoRA checkpoint format.
-                        loaded_lora = load_lora_configs(lora_checkpoint)
-                        loaded_map = {cfg.module_name: cfg for cfg in loaded_lora}
-                        for cfg in lora_configs:
-                            if cfg.module_name in loaded_map:
-                                cfg.b.copy_(loaded_map[cfg.module_name].b.to(cfg.b.device))
-                                cfg.a.copy_(loaded_map[cfg.module_name].a.to(cfg.a.device))
-            else:
-                if not checkpoint:
-                    raise ValueError("checkpoint is required in base mode")
-                model = init_model_from_checkpoint(self.model_config, checkpoint)
-                model = model.to(self.device)
+            model = load_model_for_inference(
+                self.model_config,
+                checkpoint=checkpoint,
+                lora_checkpoint=lora_checkpoint,
+                lora_base_checkpoint=self.lora_base_model_checkpoint or "",
+                lora_r=self.lora_r or 8,
+                lora_full_finetune=self.lora_full_finetune,
+                device=self.device,
+            )
             model.eval()
             self._loaded = LoadedModel(checkpoint=effective_checkpoint, lora_checkpoint=lora_checkpoint, model=model)
             return model
-
-    @staticmethod
-    def _apply_repetition_penalty(logits: torch.Tensor, input_token_ids: list[int], repetition_penalty: float) -> torch.Tensor:
-        if repetition_penalty <= 1.0 or len(input_token_ids) == 0:
-            return logits
-        token_index = torch.tensor(list(set(input_token_ids)), dtype=torch.long, device=logits.device)
-        selected = logits[token_index]
-        logits[token_index] = torch.where(selected > 0, selected / repetition_penalty, selected * repetition_penalty)
-        return logits
-
-    def _encode_text(self, text: str) -> list[int]:
-        return self.tokenizer.encode(text, add_special_tokens=False)
-
-    def _get_eos_token_id(self) -> Optional[int]:
-        eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
-        if eos_token_id is not None:
-            return int(eos_token_id)
-        return None
-
-    def _predict_next(
-        self,
-        input_token_ids: list[int],
-        model: torch.nn.Module,
-        temperature: float,
-        top_p: float,
-        greedy: bool,
-        repetition_penalty: float,
-        kv_cache=None,
-    ) -> int:
-        input_token_ids_tensor = torch.tensor(input_token_ids, device=self.device)
-        with torch.no_grad():
-            output = model(input_token_ids_tensor, kv_cache=kv_cache)
-            output = output / max(temperature, 1e-5)
-            logits = output[-1]
-            logits = self._apply_repetition_penalty(logits, input_token_ids, repetition_penalty)
-            if greedy:
-                return int(torch.argmax(logits).item())
-
-        prob = torch.softmax(logits, dim=-1)
-        prob_map = [(float(prob[i].item()), i) for i in range(prob.shape[-1])]
-        prob_map.sort(reverse=True)
-
-        accumulated_prob = 0.0
-        end_index = 0
-        for i, (p, _) in enumerate(prob_map):
-            accumulated_prob += p
-            if accumulated_prob >= top_p:
-                end_index = i + 1
-                break
-
-        if end_index <= 0:
-            return int(torch.argmax(logits).item())
-
-        distribution = [(prob_map[i][0] / accumulated_prob, prob_map[i][1]) for i in range(end_index)]
-        _, token_id = random.choices(distribution, weights=[p[0] for p in distribution], k=1)[0]
-        return int(token_id)
 
     def generate(
         self,
@@ -513,31 +421,22 @@ class TinyLMService:
         repetition_penalty: float,
     ) -> dict[str, Any]:
         model = self._ensure_model(checkpoint, lora_checkpoint=lora_checkpoint)
-        input_token_ids = self._encode_text(prompt)
+        input_token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         if not input_token_ids:
             raise ValueError("Prompt encoded to empty token ids")
-        token_ids = list(input_token_ids)
 
-        eos_token_id = self._get_eos_token_id()
-
-        while len(token_ids) < max_seq_len and (eos_token_id is None or token_ids[-1] != eos_token_id):
-            next_id = self._predict_next(
-                token_ids,
-                model,
-                temperature=temperature,
-                top_p=top_p,
-                greedy=greedy,
-                repetition_penalty=repetition_penalty,
-                kv_cache=None,
-            )
-            token_ids.append(next_id)
-
-        return {
-            "text": self.tokenizer.decode(token_ids),
-            "input_token_ids": input_token_ids,
-            "output_token_ids": token_ids[len(input_token_ids):],
-            "full_token_ids": token_ids,
-        }
+        return eval_generate(
+            model,
+            self.tokenizer,
+            input_token_ids,
+            max_seq_len=max_seq_len,
+            temperature=temperature,
+            top_p=top_p,
+            greedy=greedy,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=self.tokenizer.eos_token_id,
+            kv_cache=None,
+        )
 
 
 class RequestHandler(BaseHTTPRequestHandler):

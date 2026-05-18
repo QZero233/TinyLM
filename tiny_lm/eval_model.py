@@ -1,4 +1,5 @@
 import argparse
+import math
 import random
 from typing import Any, List, Optional, Tuple
 
@@ -7,13 +8,17 @@ from torch.utils.data import DataLoader
 
 from tiny_lm import (
     DEFAULT_TRAIN_CONFIG,
+    LoRAConfig,
     ModelConfig,
     TrainConfig,
     TransformerKVCache,
     cross_entropy_loss,
     get_dataset,
     get_tokenizer,
+    init_model,
     init_model_from_checkpoint,
+    load_checkpoint,
+    load_lora_trainable_checkpoint,
     load_train_config,
 )
 
@@ -47,7 +52,7 @@ def _predict_next_token(
     model.eval()
     with torch.no_grad():
         output = model(input_token_ids_tensor, kv_cache=kv_cache)
-        output /= temperature
+        output /= max(temperature, 1e-5)
 
         logits = output[-1]
         logits = _apply_repetition_penalty(logits, input_token_ids, repetition_penalty)
@@ -90,6 +95,94 @@ def _get_eos_token_id(tokenizer: TokenizerT) -> Optional[int]:
     return None
 
 
+def _build_lora_configs(model_config: ModelConfig, r: int, device: str = "cpu") -> List[LoRAConfig]:
+    lora_configs: List[LoRAConfig] = []
+    for i in range(model_config.num_layers):
+        for component in ["linear_q", "linear_k", "linear_v", "linear_out"]:
+            b = torch.zeros(model_config.d_model, r, device=device)
+            a = torch.zeros(r, model_config.d_model, device=device)
+            init_std = 2 / (r + model_config.d_model)
+            torch.nn.init.trunc_normal_(b, mean=0.0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
+            torch.nn.init.trunc_normal_(a, mean=0.0, std=init_std, a=-3 * math.sqrt(init_std), b=3 * math.sqrt(init_std))
+            lora_configs.append(LoRAConfig(f"transformer_layers.{i}.multi_head_attn.{component}", b, a))
+    return lora_configs
+
+
+def load_model_for_inference(
+    model_config: ModelConfig,
+    checkpoint: str,
+    lora_checkpoint: str = "",
+    lora_base_checkpoint: str = "",
+    lora_r: int = 8,
+    lora_full_finetune: bool = False,
+    device: str = "cpu",
+) -> torch.nn.Module:
+    model_config.pytorch_impl = False
+
+    if lora_checkpoint:
+        if lora_full_finetune:
+            model = init_model_from_checkpoint(model_config, lora_checkpoint)
+        else:
+            model = init_model_from_checkpoint(model_config, lora_base_checkpoint or checkpoint)
+            model = model.to(device)
+            lora_configs = _build_lora_configs(model_config, lora_r, device)
+            model.adapt_lora(lora_configs)
+            try:
+                load_lora_trainable_checkpoint(lora_checkpoint, model)
+            except Exception:
+                from tiny_lm import load_lora_configs
+                loaded_lora = load_lora_configs(lora_checkpoint)
+                loaded_map = {cfg.module_name: cfg for cfg in loaded_lora}
+                for cfg in lora_configs:
+                    if cfg.module_name in loaded_map:
+                        cfg.b.copy_(loaded_map[cfg.module_name].b.to(cfg.b.device))
+                        cfg.a.copy_(loaded_map[cfg.module_name].a.to(cfg.a.device))
+    else:
+        model = init_model_from_checkpoint(model_config, checkpoint)
+        model = model.to(device)
+
+    model.eval()
+    return model
+
+
+def generate(
+    model: torch.nn.Module,
+    tokenizer: TokenizerT,
+    input_token_ids: List[int],
+    max_seq_len: int,
+    temperature: float = 1.0,
+    top_p: float = 0.9,
+    greedy: bool = False,
+    repetition_penalty: float = 1.0,
+    eos_token_id: Optional[int] = None,
+    kv_cache: Optional[TransformerKVCache] = None,
+) -> dict:
+    if not input_token_ids:
+        raise ValueError("input_token_ids is empty")
+
+    token_ids = list(input_token_ids)
+    eos_token_id = _get_eos_token_id(tokenizer) if eos_token_id is None else eos_token_id
+
+    while len(token_ids) < max_seq_len and (eos_token_id is None or token_ids[-1] != eos_token_id):
+        next_id = _predict_next_token(
+            token_ids,
+            model,
+            temperature=temperature,
+            top_p=top_p,
+            greedy=greedy,
+            repetition_penalty=repetition_penalty,
+            kv_cache=kv_cache,
+        )
+        token_ids.append(next_id)
+
+    return {
+        "text": tokenizer.decode(token_ids),
+        "input_token_ids": input_token_ids,
+        "output_token_ids": token_ids[len(input_token_ids):],
+        "full_token_ids": token_ids,
+    }
+
+
 def _auto_regression(
     prompt: str,
     max_seq_len: int,
@@ -99,23 +192,17 @@ def _auto_regression(
     greedy: bool = False,
     kv_cache: Optional[TransformerKVCache] = None,
 ) -> str:
-    token_ids = _encode_text(tokenizer, prompt)
-    eos_token_id = _get_eos_token_id(tokenizer)
-    print(f"Eos token id {eos_token_id}")
-
-    while len(token_ids) < max_seq_len and (eos_token_id is None or token_ids[-1] != eos_token_id):
-        next_id = _predict_next_token(
-            token_ids,
-            model,
-            greedy=greedy,
-            repetition_penalty=repetition_penalty,
-            kv_cache=kv_cache,
-        )
-        token_ids.append(next_id)
-        if len(token_ids) % 20 == 0:
-            print(tokenizer.decode(token_ids))
-
-    return tokenizer.decode(token_ids)
+    input_token_ids = _encode_text(tokenizer, prompt)
+    result = generate(
+        model,
+        tokenizer,
+        input_token_ids,
+        max_seq_len=max_seq_len,
+        greedy=greedy,
+        repetition_penalty=repetition_penalty,
+        kv_cache=kv_cache,
+    )
+    return result["text"]
 
 
 def _eval_valid_loss(model: torch.nn.Module, config: ModelConfig, train_config: TrainConfig,
@@ -150,7 +237,6 @@ def _eval_valid_loss(model: torch.nn.Module, config: ModelConfig, train_config: 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate or generate with TinyLM")
     parser.add_argument("--config", type=str, default=DEFAULT_TRAIN_CONFIG)
-    parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--mode", type=str, choices=["generate", "valid_loss"], default="generate")
     parser.add_argument("--prompt", type=str, default="美国首都是")
     parser.add_argument("--max_seq_len", type=int, default=1024)
@@ -163,10 +249,8 @@ if __name__ == "__main__":
     config.pytorch_impl = False
     tokenizer = get_tokenizer(train_config.tokenizer_path)
 
-    checkpoint = args.checkpoint if args.checkpoint is not None else train_config.checkpoint
-    checkpoint = checkpoint if checkpoint else None
-    model = init_model_from_checkpoint(config, checkpoint)
-    model = model.to(device)
+    checkpoint = train_config.checkpoint or None
+    model = load_model_for_inference(config, checkpoint, device=device)
 
     if args.mode == "valid_loss":
         _eval_valid_loss(model, config, train_config, args.eval_batch_size)

@@ -1,11 +1,11 @@
 {
   "training": {
     "project_name": "zh_pretrain_139M",
-    "tokenizer_path": "/root/autodl-tmp/zh_data/chatglm3_tokenizer",
-    "checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_train/zh_pretrain_139M/72300.cpt",
-    "data_dir": "/root/autodl-tmp/zh_data/pre_train",
+    "tokenizer_path": "data/chatglm3_tokenizer",
+    "checkpoint": "checkpoint_train/zh_pretrain_139M/72300.cpt",
+    "data_dir": "data/zh_data",
     "zh_token_dtype": "uint16",
-    "checkpoint_base_dir": "/root/autodl-tmp/TinyLM/checkpoint_train",
+    "checkpoint_base_dir": "checkpoint_train",
     "epochs": 20,
     "gradient_accumulate": 8,
     "fix_lr": null,
@@ -14,12 +14,12 @@
     "valid_steps": 200,
     "lora": {
       "r": 8,
-      "checkpoint_base_dir": "/root/autodl-tmp/TinyLM/checkpoint_lora",
-      "data_dir": "/root/autodl-tmp/sft_data",
+      "checkpoint_base_dir": "checkpoint_lora",
+      "data_dir": "data/sft_data",
       "valid_steps": 400,
-      "base_model_checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_train/zh_pretrain_139M/72300.cpt",
-      "lora_checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_lora/zh_pretrain_139M/epoch_0_step_15200_lora.cpt",
-      "full_finetune": false,
+      "base_model_checkpoint": "checkpoint_train/zh_pretrain_139M/72300.cpt",
+      "lora_checkpoint": "",
+      "full_finetune": true,
       "fix_lr": 1e-6,
       "print_optimizer_update_ratio": false,
       "auto_resize_embedding": false,
@@ -40,7 +40,7 @@
     "d_ff": 1408,
     "theta": 10000,
     "gradient_checkpoint": false,
-    "batch_size": 16,
+    "batch_size": 12,
     "pytorch_impl": true
   },
   "optimizer": {

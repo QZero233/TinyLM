@@ -1,5 +1,4 @@
 /checkpoint/
-/data/
 
 # Python cache / build artifacts
 __pycache__/
@@ -41,3 +40,8 @@ Thumbs.db
 /checkpoint_train/
 /lab/
 /checkpoint_lora/
+
+/data/zh_data/*
+/data/sft_data/*
+!/data/zh_data/dummy_data
+!/data/sft_data/dummy_data
