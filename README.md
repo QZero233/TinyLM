@@ -16,6 +16,15 @@
 
 ---
 
+## 项目来源
+
+本项目代码来源于 **Stanford CS336 Assignment 1**，在原开源协议前提下进行了结构调整与功能扩展。
+
+- GitHub：https://github.com/QZero233/TinyLM
+- ModelScope（权重与数据）：https://www.modelscope.cn/models/QZero233/tiny_lm
+
+---
+
 ## 项目简介
 
 TinyLM 是一个从零实现的 Transformer 语言模型项目，基于 **PyTorch**，在 **中文百科类数据**（百度百科 + 中文维基百科）上预训练了约 **139M 参数** 的模型，并进行了指令微调。
@@ -34,13 +43,6 @@ TinyLM 是一个从零实现的 Transformer 语言模型项目，基于 **PyTorc
 - 推理阶段 KV Cache 增量解码
 - 统一的 JSON 配置文件管理所有训练参数
 - 基于 `uv` 的简洁运行方式
-
-### 项目来源
-
-本项目代码来源于 **Stanford CS336 Assignment 1**，在原开源协议前提下进行了结构调整与功能扩展。
-
-- GitHub：https://github.com/QZero233/TinyLM
-- ModelScope（权重与数据）：https://www.modelscope.cn/models/QZero233/tiny_lm
 
 ---
 
@@ -174,6 +176,12 @@ uv run tiny_lm/eval_model.py --config configs/train_zh.json --mode valid_loss
 ⚠️ **当前处于 TODO 状态，暂不可用。**
 
 分布式训练代码位于 `tiny_lm/dist_train/`，尚未适配当前版本。
+
+## 项目支持
+
+如果这个项目对你有帮助，欢迎在 GitHub 上给个 ⭐ Star！
+
+---
 
 ## 许可证
 
