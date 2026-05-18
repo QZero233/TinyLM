@@ -16,9 +16,10 @@ import torch
 
 from tiny_lm import (
     LoRAConfig,
-    TransformerKVCache,
     get_tokenizer,
+    init_model,
     init_model_from_checkpoint,
+    load_checkpoint,
     load_lora_configs,
     load_lora_trainable_checkpoint,
     load_train_config,
@@ -137,6 +138,9 @@ HTML_PAGE = """<!doctype html>
         <label>LoRA Checkpoint</label>
         <select id=\"lora_checkpoint\"></select>
       </div>
+      <div class=\"full\" id=\"lora_special_token_row\" style=\"display:none;\">
+        <label><input id=\"lora_add_special_tokens\" type=\"checkbox\" checked /> Add special token (<|user|> ... <|assistant|>)</label>
+      </div>
       <div>
         <label>Max Seq Len</label>
         <input id=\"max_seq_len\" type=\"number\" min=\"1\" value=\"32\" />
@@ -182,6 +186,8 @@ HTML_PAGE = """<!doctype html>
     const modeSel = document.getElementById('mode');
     const loraCheckpointRow = document.getElementById('lora_checkpoint_row');
     const loraCheckpointSel = document.getElementById('lora_checkpoint');
+    const loraSpecialTokenRow = document.getElementById('lora_special_token_row');
+    const loraAddSpecialTokens = document.getElementById('lora_add_special_tokens');
     const statusEl = document.getElementById('status');
     const outputEl = document.getElementById('output');
     const inputTokenIdsEl = document.getElementById('input_token_ids');
@@ -219,6 +225,7 @@ HTML_PAGE = """<!doctype html>
     function updateModeUI() {
       const mode = modeSel.value;
       loraCheckpointRow.style.display = mode === 'lora' ? '' : 'none';
+      loraSpecialTokenRow.style.display = mode === 'lora' ? '' : 'none';
     }
 
     async function runGenerate() {
@@ -238,6 +245,7 @@ HTML_PAGE = """<!doctype html>
           mode: mode,
           checkpoint: checkpointSel.value,
           lora_checkpoint: loraCheckpoint,
+          lora_add_special_tokens: loraAddSpecialTokens.checked,
           prompt: document.getElementById('prompt').value,
           max_seq_len: Number(document.getElementById('max_seq_len').value),
           temperature: Number(document.getElementById('temperature').value),
@@ -292,6 +300,7 @@ class TinyLMService:
         self.lora_checkpoint_dir: Optional[str] = None
         self.lora_r: Optional[int] = None
         self.lora_base_model_checkpoint: Optional[str] = None
+        self.lora_full_finetune: bool = False
         with open(self.config_path, "r", encoding="utf-8") as f:
             raw_cfg = json.load(f)
         lora_cfg = raw_cfg.get("training", {}).get("lora", {})
@@ -305,6 +314,7 @@ class TinyLMService:
             base_model_checkpoint = lora_cfg.get("base_model_checkpoint", "")
             if base_model_checkpoint:
                 self.lora_base_model_checkpoint = os.path.abspath(base_model_checkpoint)
+            self.lora_full_finetune = bool(lora_cfg.get("full_finetune", False))
         self._model_lock = threading.Lock()
         self._loaded: Optional[LoadedModel] = None
 
@@ -334,14 +344,7 @@ class TinyLMService:
                 if file.endswith(".cpt"):
                     valid.append(os.path.abspath(os.path.join(dirpath, file)))
 
-        def sort_key(path: str) -> tuple[int, float]:
-            base = os.path.splitext(os.path.basename(path))[0]
-            step = -1
-            if base.isdigit():
-                step = int(base)
-            return (step, os.path.getmtime(path))
-
-        valid.sort(key=sort_key, reverse=True)
+        valid.sort(key=lambda p: os.path.getmtime(p), reverse=True)
         return valid
 
     def _scan_lora_checkpoints(self) -> list[str]:
@@ -354,13 +357,7 @@ class TinyLMService:
                 if file.endswith(".cpt"):
                     checkpoints.append(os.path.abspath(os.path.join(dirpath, file)))
 
-        def sort_key(path: str) -> tuple[int, float]:
-            base = os.path.splitext(os.path.basename(path))[0]
-            nums = [int(x) for x in base.split("_") if x.isdigit()]
-            step = nums[-1] if nums else -1
-            return (step, os.path.getmtime(path))
-
-        checkpoints.sort(key=sort_key, reverse=True)
+        checkpoints.sort(key=lambda p: os.path.getmtime(p), reverse=True)
         return checkpoints
 
     def _checkpoint_looks_compatible(self, checkpoint_path: str) -> bool:
@@ -377,13 +374,7 @@ class TinyLMService:
     def checkpoints(self) -> dict[str, Any]:
         ckpts = [p for p in self._scan_checkpoints() if self._checkpoint_looks_compatible(p)]
         lora_ckpts = self._scan_lora_checkpoints()
-        default_ckpt = None
-        if self.train_config.checkpoint and os.path.isfile(self.train_config.checkpoint):
-            configured = os.path.abspath(self.train_config.checkpoint)
-            if configured in ckpts:
-                default_ckpt = configured
-        elif ckpts:
-            default_ckpt = ckpts[0]
+        default_ckpt = ckpts[0] if ckpts else None
         default_lora_checkpoint = lora_ckpts[0] if lora_ckpts else None
 
         return {
@@ -408,37 +399,50 @@ class TinyLMService:
         }
 
     def _ensure_model(self, checkpoint: str, lora_checkpoint: str = "") -> torch.nn.Module:
-        checkpoint = os.path.abspath(checkpoint)
+        checkpoint = os.path.abspath(checkpoint) if checkpoint else ""
         lora_checkpoint = os.path.abspath(lora_checkpoint) if lora_checkpoint else ""
         with self._model_lock:
+            effective_checkpoint = checkpoint
+            if lora_checkpoint and not self.lora_full_finetune:
+                if not self.lora_base_model_checkpoint:
+                    raise ValueError("lora mode requires training.lora.base_model_checkpoint in config")
+                effective_checkpoint = self.lora_base_model_checkpoint
+
             if (
                 self._loaded is not None
-                and self._loaded.checkpoint == checkpoint
+                and self._loaded.checkpoint == effective_checkpoint
                 and self._loaded.lora_checkpoint == lora_checkpoint
             ):
                 return self._loaded.model
 
             if lora_checkpoint:
-                base_checkpoint = self.lora_base_model_checkpoint if self.lora_base_model_checkpoint else checkpoint
-                model = init_model_from_checkpoint(self.model_config, base_checkpoint)
-                model = model.to(self.device)
-                lora_configs = self._build_lora_configs()
-                model.adapt_lora(lora_configs)
-                try:
-                    load_lora_trainable_checkpoint(lora_checkpoint, model)
-                except Exception:
-                    # Backward compatibility for old LoRA checkpoint format.
-                    loaded_lora = load_lora_configs(lora_checkpoint)
-                    loaded_map = {cfg.module_name: cfg for cfg in loaded_lora}
-                    for cfg in lora_configs:
-                        if cfg.module_name in loaded_map:
-                            cfg.b.copy_(loaded_map[cfg.module_name].b.to(cfg.b.device))
-                            cfg.a.copy_(loaded_map[cfg.module_name].a.to(cfg.a.device))
+                if self.lora_full_finetune:
+                    # In full_finetune mode, lora checkpoint is a full model checkpoint.
+                    model = init_model(self.model_config)
+                    load_checkpoint(lora_checkpoint, model, None)
+                    model = model.to(self.device)
+                else:
+                    model = init_model_from_checkpoint(self.model_config, self.lora_base_model_checkpoint)
+                    model = model.to(self.device)
+                    lora_configs = self._build_lora_configs()
+                    model.adapt_lora(lora_configs)
+                    try:
+                        load_lora_trainable_checkpoint(lora_checkpoint, model)
+                    except Exception:
+                        # Backward compatibility for old LoRA checkpoint format.
+                        loaded_lora = load_lora_configs(lora_checkpoint)
+                        loaded_map = {cfg.module_name: cfg for cfg in loaded_lora}
+                        for cfg in lora_configs:
+                            if cfg.module_name in loaded_map:
+                                cfg.b.copy_(loaded_map[cfg.module_name].b.to(cfg.b.device))
+                                cfg.a.copy_(loaded_map[cfg.module_name].a.to(cfg.a.device))
             else:
+                if not checkpoint:
+                    raise ValueError("checkpoint is required in base mode")
                 model = init_model_from_checkpoint(self.model_config, checkpoint)
                 model = model.to(self.device)
             model.eval()
-            self._loaded = LoadedModel(checkpoint=checkpoint, lora_checkpoint=lora_checkpoint, model=model)
+            self._loaded = LoadedModel(checkpoint=effective_checkpoint, lora_checkpoint=lora_checkpoint, model=model)
             return model
 
     @staticmethod
@@ -467,7 +471,7 @@ class TinyLMService:
         top_p: float,
         greedy: bool,
         repetition_penalty: float,
-        kv_cache: Optional[TransformerKVCache],
+        kv_cache=None,
     ) -> int:
         input_token_ids_tensor = torch.tensor(input_token_ids, device=self.device)
         with torch.no_grad():
@@ -515,7 +519,6 @@ class TinyLMService:
         token_ids = list(input_token_ids)
 
         eos_token_id = self._get_eos_token_id()
-        kv_cache = TransformerKVCache(self.model_config.num_layers)
 
         while len(token_ids) < max_seq_len and (eos_token_id is None or token_ids[-1] != eos_token_id):
             next_id = self._predict_next(
@@ -525,7 +528,7 @@ class TinyLMService:
                 top_p=top_p,
                 greedy=greedy,
                 repetition_penalty=repetition_penalty,
-                kv_cache=kv_cache,
+                kv_cache=None,
             )
             token_ids.append(next_id)
 
@@ -576,12 +579,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             checkpoint = str(payload.get("checkpoint", "")).strip()
             mode = str(payload.get("mode", "base")).strip().lower()
             lora_checkpoint = str(payload.get("lora_checkpoint", "")).strip()
+            lora_add_special_tokens = bool(payload.get("lora_add_special_tokens", True))
             prompt = str(payload.get("prompt", ""))
             if mode == "lora":
                 if not lora_checkpoint:
                     raise ValueError("lora mode requires lora_checkpoint")
-                prompt = f"<|user|>{prompt}<|assistant|>"
-            if not checkpoint:
+                if lora_add_special_tokens:
+                    prompt = f"<|user|>{prompt}<|assistant|>"
+            if mode != "lora" and not checkpoint:
                 raise ValueError("checkpoint is required")
             if not prompt:
                 raise ValueError("prompt is required")

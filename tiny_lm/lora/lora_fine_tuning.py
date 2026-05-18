@@ -19,7 +19,6 @@ from tiny_lm import (
     init_model,
     init_optimizer,
     load_checkpoint,
-    load_lora_configs,
     load_lora_train_config,
     load_lora_trainable_checkpoint,
     save_checkpoint,
@@ -31,10 +30,6 @@ from tiny_lm.load_config import get_tokenizer
 
 
 PAIR_FILE_PATTERN = re.compile(r"^epoch_(\d+)_step_(\d+)_(model|lora)\.cpt$")
-TOTAL_LORA_STEPS = 120000
-LORA_WARMUP_STEPS = 3600
-LORA_LR_MIN = 1e-5
-LORA_LR_MAX = 5e-5
 
 
 def _encode_text(tokenizer, text: str) -> list[int]:
@@ -120,33 +115,51 @@ def _load_step_from_lora_checkpoint(lora_checkpoint: str) -> int:
         return 0
 
 
-def cleanup_old_checkpoint_pairs(save_root: str, max_keep_pairs: int = 5) -> None:
-    pair_map: dict[tuple[int, int], dict[str, str]] = {}
+def _load_step_from_full_checkpoint(checkpoint: str) -> int:
+    if not checkpoint:
+        return 0
+    try:
+        state = torch.load(checkpoint, map_location="cpu")
+        return int(state.get("t", 0))
+    except Exception as e:
+        print(f"Warning: failed to load step from checkpoint {checkpoint}: {e}")
+        return 0
+
+
+def cleanup_old_lora_checkpoints(save_root: str, max_keep: int = 5) -> None:
+    lora_files: list[tuple[int, int, str]] = []
     for file_name in os.listdir(save_root):
         match = PAIR_FILE_PATTERN.match(file_name)
         if not match:
             continue
+        if match.group(3) != "lora":
+            continue
         epoch = int(match.group(1))
         step = int(match.group(2))
-        kind = match.group(3)
-        key = (step, epoch)
-        pair_map.setdefault(key, {})[kind] = os.path.join(save_root, file_name)
+        lora_files.append((step, epoch, os.path.join(save_root, file_name)))
 
-    if len(pair_map) <= max_keep_pairs:
+    if len(lora_files) <= max_keep:
         return
 
-    sorted_keys = sorted(pair_map.keys(), reverse=True)
-    keep_keys = set(sorted_keys[:max_keep_pairs])
+    lora_files.sort(reverse=True)  # newer first by (step, epoch)
     removed_count = 0
-    for key, paths in pair_map.items():
-        if key in keep_keys:
-            continue
-        for path in paths.values():
-            if os.path.exists(path):
-                os.remove(path)
-                removed_count += 1
+    for _, _, file_path in lora_files[max_keep:]:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            removed_count += 1
     if removed_count > 0:
-        print(f"[Checkpoint] Removed {removed_count} old checkpoint files, keep latest {max_keep_pairs} pairs")
+        print(f"[Checkpoint] Removed {removed_count} old lora checkpoints, keep latest {max_keep}")
+
+
+def _print_trainable_update_ratios(model: torch.nn.Module, param_before: dict[str, torch.Tensor]) -> None:
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name not in param_before:
+            continue
+        param_after = param.detach()
+        real_update_ratio = (param_after - param_before[name]).norm().item() / (param_after.norm().item() + 1e-12)
+        print(f"[OptimizerUpdateRatio] {name}: {real_update_ratio}")
 
 
 def train_epoch(
@@ -157,9 +170,14 @@ def train_epoch(
     valid_steps: int,
     checkpoint_save_steps: int,
     fix_lr: float | None,
+    lr_scheduler_warmup_steps: int,
+    lr_scheduler_total_steps: int,
+    lr_scheduler_min_lr: float,
+    lr_scheduler_max_lr: float,
+    print_optimizer_update_ratio: bool,
     save_root: str,
     epoch: int,
-    lora_configs: list[LoRAConfig],
+    full_finetune: bool,
     global_step: int,
     writer: SummaryWriter,
 ) -> Tuple[float, int]:
@@ -176,7 +194,7 @@ def train_epoch(
             current_lr = fix_lr
         else:
             current_lr = _cosine_lr_scheduler_with_floor(
-                global_step, LORA_LR_MAX, LORA_LR_MIN, LORA_WARMUP_STEPS, TOTAL_LORA_STEPS
+                global_step, lr_scheduler_max_lr, lr_scheduler_min_lr, lr_scheduler_warmup_steps, lr_scheduler_total_steps
             )
         for param_group in optimizer.param_groups:
             param_group["lr"] = current_lr
@@ -185,8 +203,17 @@ def train_epoch(
             logits = model(x, None)
             ce_loss = cross_entropy_loss(logits, y, ignore_label=-100)
         ce_loss.backward()
+        param_before = None
+        if print_optimizer_update_ratio and (global_step + 1) % 10 == 0:
+            param_before = {
+                name: param.detach().clone()
+                for name, param in model.named_parameters()
+                if param.requires_grad
+            }
         gradient_clip(model.parameters(), m=1)
         optimizer.step()
+        if param_before is not None:
+            _print_trainable_update_ratios(model, param_before)
         optimizer.zero_grad()
 
         current_global_step = global_step + 1
@@ -201,9 +228,12 @@ def train_epoch(
 
         if checkpoint_save_steps > 0 and global_step % checkpoint_save_steps == 0:
             lora_ckpt = os.path.join(save_root, f"epoch_{epoch}_step_{global_step}_lora.cpt")
-            save_lora_trainable_checkpoint(model, global_step, lora_ckpt)
+            if full_finetune:
+                save_checkpoint(model, None, global_step, lora_ckpt)
+            else:
+                save_lora_trainable_checkpoint(model, global_step, lora_ckpt)
             print(f"[Checkpoint] Saved lora checkpoint: {lora_ckpt}")
-            cleanup_old_checkpoint_pairs(save_root, max_keep_pairs=5)
+            cleanup_old_lora_checkpoints(save_root, max_keep=20)
 
         total_loss += ce_loss.item()
         steps += 1
@@ -229,32 +259,47 @@ def main():
 
     tokenizer = get_tokenizer(train_config.tokenizer_path)
     tokenizer_vocab_size = _get_tokenizer_vocab_size(tokenizer)
-    lora_configs = _build_lora_configs(config, lora_train_config.r, "cuda")
+    full_finetune = bool(lora_train_config.full_finetune)
+    lora_configs = [] if full_finetune else _build_lora_configs(config, lora_train_config.r, "cuda")
     base_model_checkpoint = lora_train_config.base_model_checkpoint if lora_train_config.base_model_checkpoint else None
     if lora_train_config.lora_checkpoint:
+        if full_finetune:
+            model = init_model_from_checkpoint(config, lora_train_config.lora_checkpoint)
+            _ensure_model_vocab_compatible(model, tokenizer_vocab_size, lora_train_config.auto_resize_embedding)
+            model = model.to("cuda")
+        else:
+            model = init_model(config)
+            _ensure_model_vocab_compatible(model, tokenizer_vocab_size, lora_train_config.auto_resize_embedding)
+            model = model.to("cuda")
+            if base_model_checkpoint:
+                load_checkpoint(base_model_checkpoint, model, None)
+            model.adapt_lora(lora_configs)
+            load_lora_trainable_checkpoint(lora_train_config.lora_checkpoint, model)
+    else:
         model = init_model(config)
         _ensure_model_vocab_compatible(model, tokenizer_vocab_size, lora_train_config.auto_resize_embedding)
         model = model.to("cuda")
         if base_model_checkpoint:
             load_checkpoint(base_model_checkpoint, model, None)
-        model.adapt_lora(lora_configs)
-        load_lora_trainable_checkpoint(lora_train_config.lora_checkpoint, model)
-    else:
-        model = init_model_from_checkpoint(config, base_model_checkpoint)
-        _ensure_model_vocab_compatible(model, tokenizer_vocab_size, lora_train_config.auto_resize_embedding)
-        model = model.to("cuda")
-        model.adapt_lora(lora_configs)
+        if not full_finetune:
+            model.adapt_lora(lora_configs)
 
     optimizer = init_optimizer(optimizer_config, model)
-    global_step = _load_step_from_lora_checkpoint(lora_train_config.lora_checkpoint) if not optimizer_config.reset else 0
-    if global_step > TOTAL_LORA_STEPS:
-        print(f"[LR] global_step {global_step} exceeds total schedule steps {TOTAL_LORA_STEPS}, lr will stay at {LORA_LR_MIN}")
+    if optimizer_config.reset:
+        global_step = 0
+    elif full_finetune:
+        global_step = _load_step_from_full_checkpoint(lora_train_config.lora_checkpoint)
+    else:
+        global_step = _load_step_from_lora_checkpoint(lora_train_config.lora_checkpoint)
+    if global_step > lora_train_config.lr_scheduler_total_steps:
+        print(f"[LR] global_step {global_step} exceeds total schedule steps {lora_train_config.lr_scheduler_total_steps}, lr will stay at {lora_train_config.lr_scheduler_min_lr}")
 
     dataset = SFTJsonlDataset(
         data_path=lora_train_config.data_dir,
         tokenizer=tokenizer,
         context_length=config.context_length,
         split="train",
+        mask_question=lora_train_config.mask_question,
     )
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
     valid_dataset = SFTJsonlDataset(
@@ -263,6 +308,7 @@ def main():
         context_length=config.context_length,
         split="valid",
         max_samples=500,
+        mask_question=lora_train_config.mask_question,
     )
     valid_dataloader = DataLoader(valid_dataset, batch_size=config.batch_size, shuffle=False)
 
@@ -281,9 +327,14 @@ def main():
             valid_steps=lora_train_config.valid_steps,
             checkpoint_save_steps=lora_train_config.checkpoint_save_steps,
             fix_lr=lora_train_config.fix_lr,
+            lr_scheduler_warmup_steps=lora_train_config.lr_scheduler_warmup_steps,
+            lr_scheduler_total_steps=lora_train_config.lr_scheduler_total_steps,
+            lr_scheduler_min_lr=lora_train_config.lr_scheduler_min_lr,
+            lr_scheduler_max_lr=lora_train_config.lr_scheduler_max_lr,
+            print_optimizer_update_ratio=lora_train_config.print_optimizer_update_ratio,
             save_root=save_root,
             epoch=epoch,
-            lora_configs=lora_configs,
+            full_finetune=full_finetune,
             global_step=global_step,
             writer=writer,
         )

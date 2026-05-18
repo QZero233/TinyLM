@@ -35,10 +35,17 @@ class LoraTrainConfig:
     data_dir: str
     base_model_checkpoint: str
     lora_checkpoint: str = ""
+    full_finetune: bool = False
+    mask_question: bool = True
     fix_lr: float | None = None
+    print_optimizer_update_ratio: bool = False
     auto_resize_embedding: bool = True
     valid_steps: int = 200
     checkpoint_save_steps: int = 200
+    lr_scheduler_warmup_steps: int = 3600
+    lr_scheduler_total_steps: int = 120000
+    lr_scheduler_min_lr: float = 3e-6
+    lr_scheduler_max_lr: float = 1e-5
 
 
 def get_tokenizer(tokenizer_path: str) -> Any:

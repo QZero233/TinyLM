@@ -2,7 +2,7 @@
   "training": {
     "project_name": "zh_pretrain_139M",
     "tokenizer_path": "/root/autodl-tmp/zh_data/chatglm3_tokenizer",
-    "checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_train/zh_pretrain_139M/63102.cpt",
+    "checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_train/zh_pretrain_139M/72300.cpt",
     "data_dir": "/root/autodl-tmp/zh_data/pre_train",
     "zh_token_dtype": "uint16",
     "checkpoint_base_dir": "/root/autodl-tmp/TinyLM/checkpoint_train",
@@ -17,11 +17,18 @@
       "checkpoint_base_dir": "/root/autodl-tmp/TinyLM/checkpoint_lora",
       "data_dir": "/root/autodl-tmp/sft_data",
       "valid_steps": 400,
-      "base_model_checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_train/zh_pretrain_139M/63102.cpt",
-      "lora_checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_lora/zh_pretrain_139M/epoch_0_step_1600_lora.cpt",
-      "fix_lr": 1e-5,
+      "base_model_checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_train/zh_pretrain_139M/72300.cpt",
+      "lora_checkpoint": "/root/autodl-tmp/TinyLM/checkpoint_lora/zh_pretrain_139M/epoch_0_step_15200_lora.cpt",
+      "full_finetune": false,
+      "fix_lr": 1e-6,
+      "print_optimizer_update_ratio": false,
       "auto_resize_embedding": false,
-      "checkpoint_save_steps": 800
+      "checkpoint_save_steps": 800,
+      "mask_question": true,
+      "lr_scheduler_warmup_steps": 1800,
+      "lr_scheduler_total_steps": 60000,
+      "lr_scheduler_min_lr": 1e-6,
+      "lr_scheduler_max_lr": 1e-5
     }
   },
   "model": {

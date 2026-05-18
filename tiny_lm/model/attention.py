@@ -77,8 +77,18 @@ class MultiHeadAttention(nn.Module):
             mask = mask.broadcast_to((*proj_q.shape[:-2], self.num_heads, q_len, k_len))
 
         if self.rope is not None:
-            qs = self.rope(qs, rope_token_positions)
-            ks = self.rope(ks, rope_token_positions)
+            if kv_cache_state is not None:
+                # 使用KV Cache时，q和k的序列长度可能不同（q只有新token，k包含完整序列），
+                # 需要为各自计算正确的位置编码，否则新token的RoPE位置会被错误地设为0。
+                q_len = proj_q.shape[-2]
+                k_len = proj_k.shape[-2]
+                q_positions = torch.arange(k_len - q_len, k_len, device=proj_q.device)
+                k_positions = torch.arange(k_len, device=proj_q.device)
+                qs = self.rope(qs, q_positions)
+                ks = self.rope(ks, k_positions)
+            else:
+                qs = self.rope(qs, rope_token_positions)
+                ks = self.rope(ks, rope_token_positions)
         attention_res = self.attention(qs, ks, vs, mask)
 
         # (...batch, num_heads, seq_len, d_k) -> (...batch, seq_len, num_heads, d_k) -> (...batch, seq_len, d_model)

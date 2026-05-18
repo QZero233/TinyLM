@@ -7,12 +7,21 @@ from torch.utils.data import Dataset
 
 
 class SFTJsonlDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer, context_length: int, split: str = "train", max_samples: int | None = None):
+    def __init__(
+        self,
+        data_path: str,
+        tokenizer,
+        context_length: int,
+        split: str = "train",
+        max_samples: int | None = None,
+        mask_question: bool = True,
+    ):
         self.data_path = data_path
         self.tokenizer = tokenizer
         self.context_length = context_length
         self.split = split
         self.max_samples = max_samples
+        self.mask_question = mask_question
 
         if os.path.isdir(self.data_path):
             if self.split == "train":
@@ -73,11 +82,15 @@ class SFTJsonlDataset(Dataset):
 
         # label: next-token targets with prompt/question region masked.
         y_ids = token_ids[1:]
-        # Mask from index 0 to the position where question-last-token predicts <|assistant|> (inclusive).
-        # token layout: [<|user|>] + question + [<|assistant|>] + answer + [<eos>]
-        # masked positions: x[0] ... x[len(question_ids)]
-        mask_end_inclusive = len(question_ids)
-        y_ids[:mask_end_inclusive + 1] = [-100] * (mask_end_inclusive + 1)
+        if self.mask_question:
+            # Mask prompt/question region up to question-><|assistant|>.
+            # token layout: [<|user|>] + question + [<|assistant|>] + answer + [<eos>]
+            # masked positions: x[0] ... x[len(question_ids)]
+            # (i.e., label includes q_last -> <|assistant|> as masked, but keeps
+            # <|assistant|> -> answer_first for supervision.)
+            mask_end_inclusive = len(question_ids)
+            mask_end_inclusive = min(mask_end_inclusive, len(y_ids) - 1)
+            y_ids[:mask_end_inclusive + 1] = [-100] * (mask_end_inclusive + 1)
 
         if len(x_ids) > self.context_length:
             x_ids = x_ids[:self.context_length]
