@@ -2,182 +2,201 @@
 
 # 🧠 TinyLM
 
-### 从 Stanford CS336 Assignment 1 走向可复现实战的 Transformer 预训练项目
+### 从零实现的 Transformer 中文预训练语言模型
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](./pyproject.toml)
 [![Framework](https://img.shields.io/badge/framework-PyTorch-red.svg)](https://pytorch.org/)
-[![Model](https://img.shields.io/badge/model-305M%20Transformer-orange.svg)](#默认模型配置305m-transformer)
+[![Model](https://img.shields.io/badge/model-139M%20Transformer-orange.svg)](./CONFIG.md#model--模型架构配置)
 [![Runner](https://img.shields.io/badge/runner-uv-8A2BE2.svg)](https://github.com/astral-sh/uv)
 
-`Transformer from scratch` · `Distributed Training` · `KV Cache Inference` · `BPE Tokenizer`
-
-[项目亮点](#项目亮点) · [模型配置](#默认模型配置305m-transformer) · [运行方法](#运行方法4-个脚本) · [许可证](#项目来源与开源说明)
+`Transformer from scratch` · `Pre-training` · `SFT / LoRA` · `KV Cache Inference`
 
 </div>
 
-## 项目来源与开源说明
+---
 
-本项目代码来源于 **Stanford CS336 Assignment 1**，并在遵循原开源协议的前提下进行了结构调整与功能修改后开源。
+## 项目简介
 
-- 原始来源：Stanford CS336 Assignment 1
-- 当前仓库：面向实际训练/评估流程做了工程化整理
-- 许可协议：详见 [LICENSE](./LICENSE)
+TinyLM 是一个从零实现的 Transformer 语言模型项目，基于 **PyTorch**，在 **中文百科类数据**（百度百科 + 中文维基百科）上预训练了约 **139M 参数** 的模型，并进行了指令微调。
 
-## 项目亮点
+| 版本 | 参数量 | 数据 | 状态 |
+|------|--------|------|------|
+| **当前分支** | **139M**（d_model=768, layers=16） | 百度百科 + 中文维基 | ✅ 可用 |
+| legacy\_305M 分支 | 305M（d_model=1024, layers=16） | OpenAI WebText（英文） | 📦 已归档 |
 
-- 从零开始实现 Transformer 语言模型核心模块（注意力、RoPE、RMSNorm、SwiGLU 等）
-- 多进程并行数据预处理与分词，支持大文本切分后高效转 `.npy` 分片
-- 基于 `torchrun` 的分布式并行训练流程（单机/多卡可扩展）
-- 推理阶段 KV Cache 增量解码，显著减少重复计算
-- 自定义 BPE 分词器训练与加载流程，便于端到端复现实验
-- 训练工程细节完善：梯度裁剪、余弦学习率调度、checkpoint 保存/恢复
-- 支持单机快速冒烟与全量训练两种模式，便于开发调试和规模化运行切换
+> 旧版 305M 英文模型的代码已归档至 `legacy_305M` 分支。
 
-## 更新策略与仓库定位
+## 数据准备
 
-后续功能迭代与代码更新将以 GitHub 仓库为主；ModelScope 仓库主要用于存放模型权重与训练数据。
+### 下载预训练数据
 
-- GitHub（代码主仓库）：https://github.com/QZero233/TinyLM
-- ModelScope（权重与数据）：https://www.modelscope.cn/models/QZero233/tiny_lm/files
+预训练数据为百度百科和中文维基百科的 tokenized `.bin` 文件，从 ModelScope 下载：
 
-## 项目目标
+https://www.modelscope.cn/datasets/wdndev/tiny_llm_dataset
 
-TinyLM 的目标是让你可以实际体验一遍大模型预训练的核心流程，包括：
+下载后放入 `data/zh_data/` 目录：
 
-- 语料分片与分词（tokenize）
-- Transformer 语言模型训练
-- 分布式训练启动与调试
-- 文本生成与验证集 loss 评估
-
-## 默认模型配置（305M Transformer）
-
-代码中的默认配置位于 `tiny_lm/train_model.py::_get_model_config`，对应一个约 **305M 参数量** 的 Transformer 语言模型。
-
-| 配置项 | 默认值 |
-|---|---:|
-| `num_layers` | 16 |
-| `d_model` | 1024 |
-| `num_heads` | 16 |
-| `d_ff` | 2752 |
-| `context_length` | 1024 |
-| `theta` | 10000 |
-| `batch_size`（默认训练配置） | 16 |
-| 参数量（估算） | ~305M |
-
-### 模型结构示意图
-
-![TinyLM 模型结构](./img/architecture.png)
-
-## 目录结构
-
-```text
-TinyLM/
-├── tiny_lm/
-│   ├── tokenize_data.py
-│   ├── train_model.py
-│   ├── train_model_dist.py
-│   └── eval_model.py
-├── saved_gpt_tokenizer/
-├── checkpoint/
-│   └── 4.5B.cpt
-└── data/
-    ├── test.txt
-    ├── owt_train.txt / owt_valid.txt
-    ├── train_*.npy
-    └── valid_*.npy
+```
+data/
+├── zh_data/
+│   ├── baidubaike_563w_1.bin
+│   ├── baidubaike_563w_2.bin
+│   ├── baidubaike_563w_3.bin
+│   ├── baidubaike_563w_4.bin
+│   ├── baidubaike_563w_5.bin
+│   └── wikipedia-cn.bin
+├── sft_data/
+│   ├── sft_data.jsonl
+│   └── sft_data_test.jsonl
+└── chatglm3_tokenizer/
+    ├── tokenizer.model
+    ├── tokenizer_config.json
+    ├── vocab.txt
+    └── ...
 ```
 
-## 环境准备
+### 下载 SFT 数据
 
-推荐使用 `uv`：
+在同一数据集页面下载 SFT 用的 JSONL 文件，放入 `data/sft_data/` 目录。每行格式为：
+
+```json
+{"question": "...", "answer": "..."}
+```
+
+### 分词器
+
+使用 ChatGLM3 的 BPE 分词器，已包含在 `data/chatglm3_tokenizer/` 目录中。
+
+## 环境准备
 
 ```bash
 uv sync
 ```
 
-## 运行方法（4 个脚本）
+## 配置文件
 
-### 1) `tokenize_data.py`：把文本分词并保存为 `.npy` 分片
+所有训练参数通过 JSON 配置文件管理。详见 [CONFIG.md](./CONFIG.md)。
 
-对验证集文本做分词：
+默认配置：`configs/train_zh.json`。各字段含义详见 [CONFIG.md](./CONFIG.md)。
 
-```bash
-uv run python -m tiny_lm.tokenize_data \
-  --data_file data/owt_valid.txt \
-  --result_prefix data/valid \
-  --workers 10 \
-  --batch_size 100000000
-```
+## 预训练
 
-对训练集文本做分词：
+预训练参数已在 JSON 中配置好，直接启动即可：
 
 ```bash
-uv run python -m tiny_lm.tokenize_data \
-  --data_file data/owt_train.txt \
-  --result_prefix data/train \
-  --workers 10 \
-  --batch_size 100000000
+uv run python -m tiny_lm.train_model --config configs/train_zh.json
 ```
 
-### 2) `train_model.py`：单进程训练
+### 从 Checkpoint 恢复训练
+
+修改 JSON 中的 `checkpoint` 字段指向已有的 `.cpt` 文件：
+
+```json
+{
+  "training": {
+    "checkpoint": "/path/to/checkpoint.cpt",
+    ...
+  }
+}
+```
+
+> 传入空字符串或不存在的路径时从随机初始化开始。
+
+## 指令微调
+
+微调同样通过 JSON 配置，使用 `lora` 子节控制微调参数。通过 `full_finetune` 字段切换全量微调和 LoRA：
+
+```json
+{
+  "training": {
+    "lora": {
+      "full_finetune": true,
+      "base_model_checkpoint": "/path/to/pretrained_checkpoint.cpt",
+      ...
+    }
+  }
+}
+```
+
+### 全量微调（SFT）
 
 ```bash
-uv run python -m tiny_lm.train_model \
-  --tokenizer_dir saved_gpt_tokenizer \
-  --checkpoint checkpoint/4.5B.cpt \
-  --data_dir data \
-  --checkpoint_base_dir checkpoint \
-  --epochs 1 \
-  --gradient_accumulate 8
+uv run python -m tiny_lm.lora.lora_fine_tuning --config configs/train_zh.json
 ```
 
-快速冒烟测试可加小模型参数：
+需要设置：
+- `lora.full_finetune: true`
+- `lora.base_model_checkpoint`：指向预训练 checkpoint
+- `lora.data_dir`：SFT 数据目录（JSONL 文件所在目录）
+
+### LoRA 微调
+
+同样一条命令，切换 `full_finetune` 即可：
+
+```json
+{
+  "training": {
+    "lora": {
+      "full_finetune": false,
+      "r": 8,
+      ...
+    }
+  }
+}
+```
 
 ```bash
---context_length 8 --num_layers 2 --d_model 32 --num_heads 4 --d_ff 64 --batch_size 1
+uv run python -m tiny_lm.lora.lora_fine_tuning --config configs/train_zh.json
 ```
 
-### 3) `eval_model.py`：生成文本或评估验证集 loss
+> **注意**：LoRA 效果通常不如全量微调，推荐优先使用全量微调。LoRA 模式下学习率建议设为全量的 1/10～1/100。
 
-自回归生成：
+### 从 Checkpoint 恢复微调
+
+全量微调恢复：设置 `lora.lora_checkpoint` 指向已有的 SFT checkpoint。
+
+LoRA 恢复：同样设置 `lora.lora_checkpoint` 指向已有的 LoRA checkpoint（需要配套设置 `lora.base_model_checkpoint`）。
+
+## 生成与评估
+
+使用 `eval_model.py` 进行文本生成或验证集 loss 评估：
 
 ```bash
-uv run python -m tiny_lm.eval_model \
-  --mode generate \
-  --tokenizer_dir saved_gpt_tokenizer \
-  --checkpoint checkpoint/4.5B.cpt \
-  --prompt "The capital of the United States is a place called" \
-  --max_seq_len 256
+# 文本生成
+uv run python -m tiny_lm.eval_model --config configs/train_zh.json --prompt "中国的首都是" --max_seq_len 256
+
+# 验证集 loss
+uv run python -m tiny_lm.eval_model --config configs/train_zh.json --mode valid_loss
 ```
 
-验证集 loss：
+## WebUI
+
+提供浏览器交互界面：
 
 ```bash
-uv run python -m tiny_lm.eval_model \
-  --mode valid_loss \
-  --tokenizer_dir saved_gpt_tokenizer \
-  --checkpoint checkpoint/4.5B.cpt
+uv run python webui/app.py --config configs/train_zh.json --port 6008
 ```
 
-### 4) `train_model_dist.py`：分布式训练（`torchrun`）
+支持 base checkpoint 和 LoRA checkpoint 两种模式。
 
-单节点示例（你要求的 `nnodes=1`）：
+## 分布式训练
 
-```bash
-uv run torchrun --nnodes=1 --nproc_per_node=1 \
-  -m tiny_lm.train_model_dist \
-  --tokenizer_dir saved_gpt_tokenizer \
-  --checkpoint checkpoint/4.5B.cpt \
-  --data_dir data \
-  --checkpoint_base_dir checkpoint \
-  --epochs 1 \
-  --gradient_accumulate 8 \
-  --batch_size 16
-```
+⚠️ **当前处于 TODO 状态，暂不可用。**
 
-## 说明
+分布式训练代码位于 `tiny_lm/dist_train/`，尚未适配当前版本。
 
-- 传入 `--checkpoint ''` 时，脚本会从随机初始化权重开始。
-- `data_dir` 需要包含 `train_*.npy` 与 `valid_*.npy`。
-- 当前 `.gitignore` 已忽略 `checkpoint/`、`data/` 以及常见缓存/临时文件。
+## 项目亮点
+
+- 从零实现 Transformer 核心模块（多头注意力、RoPE、RMSNorm、SwiGLU）
+- 完整的预训练 + SFT + LoRA 微调流程
+- 推理阶段 KV Cache 增量解码
+- 统一的 JSON 配置文件管理所有训练参数
+- 基于 `uv` 的简洁运行方式
+
+## 项目来源
+
+本项目代码来源于 **Stanford CS336 Assignment 1**，在原开源协议前提下进行了结构调整与功能扩展。
+
+- GitHub：https://github.com/QZero233/TinyLM
+- ModelScope（权重与数据）：https://www.modelscope.cn/models/QZero233/tiny_lm
