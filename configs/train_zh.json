@@ -1,17 +1,17 @@
 {
   "training": {
-    "project_name": "zh_pretrain_139M",
+    "project_name": "zh_pretrain_large",
     "tokenizer_path": "data/chatglm3_tokenizer",
-    "checkpoint": "checkpoint_train/zh_pretrain_139M/72300.cpt",
+    "checkpoint": "",
     "data_dir": "data/zh_data",
     "zh_token_dtype": "uint16",
     "checkpoint_base_dir": "checkpoint_train",
     "epochs": 20,
-    "gradient_accumulate": 8,
+    "gradient_accumulate": 1,
     "fix_lr": null,
     "print_optimizer_update_ratio": false,
-    "checkpoint_save_accum_steps": 400,
-    "valid_steps": 200,
+    "checkpoint_save_accum_steps": 200,
+    "valid_steps": 100,
     "lora": {
       "r": 8,
       "checkpoint_base_dir": "checkpoint_lora",
@@ -34,13 +34,13 @@
   "model": {
     "vocab_size": 64798,
     "context_length": 1024,
-    "num_layers": 16,
-    "d_model": 768,
-    "num_heads": 12,
-    "d_ff": 1408,
+    "num_layers": 24,
+    "d_model": 1024,
+    "num_heads": 16,
+    "d_ff": 2816,
     "theta": 10000,
-    "gradient_checkpoint": false,
-    "batch_size": 12,
+    "gradient_checkpoint": true,
+    "batch_size": 16,
     "pytorch_impl": true
   },
   "optimizer": {

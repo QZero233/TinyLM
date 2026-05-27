@@ -3,12 +3,13 @@ import math
 import os
 import re
 import time
+from dataclasses import asdict
 from typing import Tuple
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 from tiny_lm import (
     DEFAULT_TRAIN_CONFIG,
@@ -24,6 +25,7 @@ from tiny_lm import (
     save_checkpoint,
     save_lora_trainable_checkpoint,
 )
+from tiny_lm.data.checkpoint import load_torch_checkpoint
 from tiny_lm.model.transformer import Transformer
 from tiny_lm.lora.sft_dataset import SFTJsonlDataset
 from tiny_lm.load_config import get_tokenizer
@@ -119,7 +121,7 @@ def _load_step_from_full_checkpoint(checkpoint: str) -> int:
     if not checkpoint:
         return 0
     try:
-        state = torch.load(checkpoint, map_location="cpu")
+        state = load_torch_checkpoint(checkpoint, map_location="cpu")
         return int(state.get("t", 0))
     except Exception as e:
         print(f"Warning: failed to load step from checkpoint {checkpoint}: {e}")
@@ -179,7 +181,7 @@ def train_epoch(
     epoch: int,
     full_finetune: bool,
     global_step: int,
-    writer: SummaryWriter,
+    wandb_run,
 ) -> Tuple[float, int]:
     model.train()
     total_loss = 0.0
@@ -217,12 +219,16 @@ def train_epoch(
         optimizer.zero_grad()
 
         current_global_step = global_step + 1
-        writer.add_scalar("lora/train_loss_step", ce_loss.item(), current_global_step)
-        writer.add_scalar("lora/lr_step", current_lr, current_global_step)
+        if wandb_run is not None:
+            wandb_run.log({
+                "lora/train_loss_step": ce_loss.item(),
+                "lora/lr_step": current_lr,
+            }, step=current_global_step)
         global_step = current_global_step
         if valid_steps > 0 and global_step % valid_steps == 0:
             valid_loss = eval_valid_loss(model, valid_dataloader)
-            writer.add_scalar("lora/valid_loss_step", valid_loss, global_step)
+            if wandb_run is not None:
+                wandb_run.log({"lora/valid_loss_step": valid_loss}, step=global_step)
             print(f"[Valid] global_step {global_step}, ce loss {valid_loss}")
             model.train()
 
@@ -314,9 +320,17 @@ def main():
 
     save_root = os.path.join(lora_train_config.checkpoint_base_dir, train_config.project_name)
     os.makedirs(save_root, exist_ok=True)
-    tensorboard_dir = os.path.join("/root/tf-logs", f"{train_config.project_name}_lora")
-    os.makedirs(tensorboard_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=tensorboard_dir)
+    wandb_run = wandb.init(
+        project=train_config.project_name,
+        name=f"{train_config.project_name}_lora",
+        config={
+            "training": asdict(train_config),
+            "model": asdict(config),
+            "optimizer": asdict(optimizer_config),
+            "lora": asdict(lora_train_config),
+            "full_finetune": full_finetune,
+        },
+    )
 
     for epoch in range(train_config.epochs):
         avg_loss, global_step = train_epoch(
@@ -336,12 +350,14 @@ def main():
             epoch=epoch,
             full_finetune=full_finetune,
             global_step=global_step,
-            writer=writer,
+            wandb_run=wandb_run,
         )
-        writer.add_scalar("lora/train_loss_epoch", avg_loss, epoch + 1)
+        if wandb_run is not None:
+            wandb_run.log({"lora/train_loss_epoch": avg_loss, "lora/epoch": epoch + 1}, step=global_step)
         print(f"Epoch {epoch} finished, avg loss {avg_loss}, global_step {global_step}")
 
-    writer.close()
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

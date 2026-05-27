@@ -43,5 +43,8 @@ Thumbs.db
 
 /data/zh_data/*
 /data/sft_data/*
+/data/c4_data/
+/scripts/
+/wandb/
 !/data/zh_data/dummy_data
 !/data/sft_data/dummy_data

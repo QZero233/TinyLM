@@ -5,6 +5,7 @@ import os
 
 import torch
 from torch import nn
+from tiny_lm.data.checkpoint import load_torch_checkpoint
 from .common import Linear
 
 class LoRAConfig:
@@ -64,7 +65,7 @@ def save_lora_trainable_checkpoint(model: nn.Module, step: int, save_file: str) 
 
 
 def load_lora_trainable_checkpoint(load_file: str, model: nn.Module | None = None) -> int:
-    state = torch.load(load_file, map_location="cpu")
+    state = load_torch_checkpoint(load_file, map_location="cpu")
     step = int(state.get("t", 0))
     trainable_state = state.get("trainable_model")
     if model is not None:
@@ -76,7 +77,7 @@ def load_lora_trainable_checkpoint(load_file: str, model: nn.Module | None = Non
 
 def load_lora_configs(load_dir: str) -> List[LoRAConfig]:
     if os.path.isfile(load_dir):
-        state = torch.load(load_dir, map_location="cpu")
+        state = load_torch_checkpoint(load_dir, map_location="cpu")
         if "trainable_model" in state:
             items = []
             for key, tensor in state["trainable_model"].items():
@@ -101,8 +102,8 @@ def load_lora_configs(load_dir: str) -> List[LoRAConfig]:
 
     lora_configs = []
     for item in manifest:
-        b = torch.load(os.path.join(load_dir, item["b_file"]), map_location="cpu")
-        a = torch.load(os.path.join(load_dir, item["a_file"]), map_location="cpu")
+        b = load_torch_checkpoint(os.path.join(load_dir, item["b_file"]), map_location="cpu")
+        a = load_torch_checkpoint(os.path.join(load_dir, item["a_file"]), map_location="cpu")
         lora_configs.append(LoRAConfig(item["module_name"], b, a))
     return lora_configs
 

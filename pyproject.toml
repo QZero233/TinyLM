@@ -3,22 +3,22 @@ name = "cs336_basics"
 version = "26.0.0"
 description = "CS336 Assignment 1"
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "einops>=0.8",      # tensor operations
     "einx>=0.4",        # more general tensor operations
     "jaxtyping>=0.3",   # type hints for pytorch/jax/numpy
-    "numpy>=2.4",
+    "numpy>=1.26,<2.3",
     "psutil>=7",
     "pytest>=9.0",
     "pytest-timeout",
     "regex>=2026.3.32", # more powerful regex than the builtin `re` module
     "sentencepiece>=0.2",
     "tiktoken>=0.12.0",
-    "torch~=2.11.0",
+    "torch==2.10.0",
+    "torch-npu==2.10.0",
     "transformers>=4.37.2,<=4.38.2",
     "tqdm>=4.67",
-    "tensorboard>=2.20",
     "wandb>=0.25",
     "ty>=0.0.26",
     "ruff>=0.15.8"

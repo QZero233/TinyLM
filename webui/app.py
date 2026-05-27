@@ -13,11 +13,11 @@ from typing import Any, Optional
 import torch
 
 from tiny_lm import (
+    TransformerKVCache,
     get_tokenizer,
-    init_model,
-    load_checkpoint,
     load_train_config,
 )
+import tiny_lm.eval_model as eval_model_module
 from tiny_lm.eval_model import (
     generate as eval_generate,
     load_model_for_inference,
@@ -159,6 +159,9 @@ HTML_PAGE = """<!doctype html>
         <label><input id=\"greedy\" type=\"checkbox\" checked /> Greedy</label>
       </div>
       <div class=\"full\">
+        <label><input id=\"use_kv_cache\" type=\"checkbox\" checked /> Use KV Cache</label>
+      </div>
+      <div class=\"full\">
         <label>Prompt</label>
         <textarea id=\"prompt\">中国首都是</textarea>
       </div>
@@ -250,6 +253,7 @@ HTML_PAGE = """<!doctype html>
           top_p: Number(document.getElementById('top_p').value),
           repetition_penalty: Number(document.getElementById('repetition_penalty').value),
           greedy: document.getElementById('greedy').checked,
+          use_kv_cache: document.getElementById('use_kv_cache').checked,
         };
         const res = await fetch('/api/generate', {
           method: 'POST',
@@ -288,11 +292,13 @@ class LoadedModel:
 class TinyLMService:
     def __init__(self, config_path: str, device: str = "cpu"):
         self.config_path = os.path.abspath(config_path)
+        self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.device = device
+        eval_model_module.device = device
         self.train_config, self.model_config, _ = load_train_config(self.config_path)
-        self.tokenizer = get_tokenizer(self.train_config.tokenizer_path)
+        self.tokenizer = get_tokenizer(self._resolve_path(self.train_config.tokenizer_path))
         self.checkpoint_dir = os.path.abspath(
-            os.path.join(self.train_config.checkpoint_base_dir, self.train_config.project_name)
+            os.path.join(self._resolve_path(self.train_config.checkpoint_base_dir), self.train_config.project_name)
         )
         self.lora_checkpoint_dir: Optional[str] = None
         self.lora_r: Optional[int] = None
@@ -304,16 +310,32 @@ class TinyLMService:
         if isinstance(lora_cfg, dict):
             lora_base_dir = lora_cfg.get("checkpoint_base_dir", "")
             if lora_base_dir:
-                self.lora_checkpoint_dir = os.path.abspath(os.path.join(lora_base_dir, self.train_config.project_name))
+                self.lora_checkpoint_dir = os.path.abspath(
+                    os.path.join(self._resolve_path(lora_base_dir), self.train_config.project_name)
+                )
             r = lora_cfg.get("r", None)
             if isinstance(r, int) and r > 0:
                 self.lora_r = r
             base_model_checkpoint = lora_cfg.get("base_model_checkpoint", "")
             if base_model_checkpoint:
-                self.lora_base_model_checkpoint = os.path.abspath(base_model_checkpoint)
+                self.lora_base_model_checkpoint = self._resolve_path(base_model_checkpoint)
             self.lora_full_finetune = bool(lora_cfg.get("full_finetune", False))
         self._model_lock = threading.Lock()
         self._loaded: Optional[LoadedModel] = None
+
+    def _resolve_path(self, path: str) -> str:
+        if not path or os.path.isabs(path):
+            return path
+
+        candidates = [
+            os.path.join(self.project_root, path),
+            os.path.join(os.path.dirname(self.config_path), path),
+            os.path.abspath(path),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return os.path.abspath(candidate)
+        return os.path.abspath(candidates[0])
 
     def _scan_checkpoints(self) -> list[str]:
         if not os.path.isdir(self.checkpoint_dir):
@@ -341,19 +363,8 @@ class TinyLMService:
         checkpoints.sort(key=lambda p: os.path.getmtime(p), reverse=True)
         return checkpoints
 
-    def _checkpoint_looks_compatible(self, checkpoint_path: str) -> bool:
-        try:
-            state = torch.load(checkpoint_path, map_location="cpu")
-            model_state = state.get("model", state)
-            emb = model_state.get("embedding.embedding_matrix")
-            if emb is not None and len(emb.shape) == 2 and emb.shape[1] != self.model_config.d_model:
-                return False
-            return True
-        except Exception:
-            return False
-
     def checkpoints(self) -> dict[str, Any]:
-        ckpts = [p for p in self._scan_checkpoints() if self._checkpoint_looks_compatible(p)]
+        ckpts = self._scan_checkpoints()
         lora_ckpts = self._scan_lora_checkpoints()
         default_ckpt = ckpts[0] if ckpts else None
         default_lora_checkpoint = lora_ckpts[0] if lora_ckpts else None
@@ -366,14 +377,14 @@ class TinyLMService:
             "checkpoints": [
                 {
                     "path": p,
-                    "label": os.path.relpath(p, "/root/autodl-tmp/TinyLM"),
+                    "label": os.path.relpath(p, self.project_root),
                 }
                 for p in ckpts
             ],
             "lora_checkpoints": [
                 {
                     "path": p,
-                    "label": os.path.relpath(p, "/root/autodl-tmp/TinyLM"),
+                    "label": os.path.relpath(p, self.project_root),
                 }
                 for p in lora_ckpts
             ],
@@ -419,12 +430,14 @@ class TinyLMService:
         top_p: float,
         greedy: bool,
         repetition_penalty: float,
+        use_kv_cache: bool = True,
     ) -> dict[str, Any]:
         model = self._ensure_model(checkpoint, lora_checkpoint=lora_checkpoint)
         input_token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         if not input_token_ids:
             raise ValueError("Prompt encoded to empty token ids")
 
+        kv_cache = TransformerKVCache(self.model_config.num_layers) if use_kv_cache else None
         return eval_generate(
             model,
             self.tokenizer,
@@ -435,7 +448,7 @@ class TinyLMService:
             greedy=greedy,
             repetition_penalty=repetition_penalty,
             eos_token_id=self.tokenizer.eos_token_id,
-            kv_cache=None,
+            kv_cache=kv_cache,
         )
 
 
@@ -495,6 +508,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             top_p = float(payload.get("top_p", 0.9))
             greedy = bool(payload.get("greedy", True))
             repetition_penalty = float(payload.get("repetition_penalty", 1.0))
+            use_kv_cache = bool(payload.get("use_kv_cache", True))
 
             started = time.time()
             result = self.service.generate(
@@ -506,9 +520,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 top_p=top_p,
                 greedy=greedy,
                 repetition_penalty=repetition_penalty,
+                use_kv_cache=use_kv_cache,
             )
             elapsed_sec = time.time() - started
             result["elapsed_sec"] = elapsed_sec
+            result["use_kv_cache"] = use_kv_cache
             self._send_json(HTTPStatus.OK, result)
         except Exception as e:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
@@ -517,6 +533,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 class ForwardRequestHandler(BaseHTTPRequestHandler):
     target_host: str = "127.0.0.1"
     target_port: int = 6007
+    opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
 
     def _forward(self) -> None:
         body = b""
@@ -534,7 +551,7 @@ class ForwardRequestHandler(BaseHTTPRequestHandler):
             req.add_header(key, value)
 
         try:
-            with urlrequest.urlopen(req, timeout=120) as resp:
+            with self.opener.open(req, timeout=120) as resp:
                 resp_body = resp.read()
                 self.send_response(resp.status)
                 for key, value in resp.headers.items():
@@ -594,7 +611,7 @@ def start_forward_server(listen_host: str = "0.0.0.0", listen_port: int = 6006,
 
 
 def run_server(config_path: str, host: str, port: int, device: str):
-    start_forward_server(listen_host=host, listen_port=6006, target_host="127.0.0.1", target_port=6007)
+    start_forward_server(listen_host=host, listen_port=6006, target_host="127.0.0.1", target_port=port)
     service = TinyLMService(config_path=config_path, device=device)
     RequestHandler.service = service
 
@@ -606,11 +623,12 @@ def run_server(config_path: str, host: str, port: int, device: str):
 
 
 if __name__ == "__main__":
+    default_config = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "train_zh.json"))
     parser = argparse.ArgumentParser(description="TinyLM WebUI")
-    parser.add_argument("--config", type=str, default="/root/autodl-tmp/TinyLM/configs/train_zh.json")
+    parser.add_argument("--config", type=str, default=default_config)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=6008)
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="npu:1")
     args = parser.parse_args()
 
     run_server(args.config, args.host, args.port, args.device)

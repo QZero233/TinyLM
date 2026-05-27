@@ -4,10 +4,17 @@ import os.path
 import shutil
 import time
 import argparse
+from contextlib import nullcontext
+from dataclasses import asdict
 import torch
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+import wandb
+
+try:
+    import torch_npu  # noqa: F401
+except ImportError:
+    pass
 
 from tiny_lm import ModelConfig, get_dataset, load_train_config, init_model_from_checkpoint, \
     init_optimizer_from_checkpoint, cross_entropy_loss, gradient_clip, save_checkpoint, cosine_lr_scheduler, \
@@ -15,7 +22,20 @@ from tiny_lm import ModelConfig, get_dataset, load_train_config, init_model_from
 
 MIN_FREE_SPACE_BYTES = 5 * 1024 ** 3
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TENSORBOARD_ROOT = "/root/tf-logs"
+
+def _get_train_device() -> torch.device:
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return torch.device("npu:0")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def _autocast_context(device: torch.device):
+    if device.type in ("cuda", "npu"):
+        return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+    return nullcontext()
+
 
 def print_real_update_ratios(model: torch.nn.Module, param_before: dict[str, torch.Tensor]) -> None:
     for name, param in model.named_parameters():
@@ -136,14 +156,14 @@ def _save_checkpoint_with_cleanup(
             f"below required {MIN_FREE_SPACE_BYTES / 1024 ** 3:.2f} GB."
         )
 
-def _eval_validation_loss(model: torch.nn.Module, valid_dataloader: DataLoader) -> float:
+def _eval_validation_loss(model: torch.nn.Module, valid_dataloader: DataLoader, device: torch.device) -> float:
     model.eval()
     total_loss = 0.0
     total_num = 0
     for x, y in valid_dataloader:
-        x = x.cuda()
-        y = y.cuda()
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        x = x.to(device)
+        y = y.to(device)
+        with torch.no_grad(), _autocast_context(device):
             logits = model(x, None)
             loss = cross_entropy_loss(logits, y)
         total_loss += loss.item()
@@ -155,9 +175,11 @@ def _eval_validation_loss(model: torch.nn.Module, valid_dataloader: DataLoader) 
 
 def train_epoch(dataloader: DataLoader, model: torch.nn.Module, optimizer: Optimizer, checkpoint_dir: str,
                 last_train_step: int, gradient_accumulate: int = 1, fix_lr: float | None = None,
-                print_optimizer_update_ratio: bool = False, writer: SummaryWriter | None = None,
+                print_optimizer_update_ratio: bool = False, wandb_run = None,
                 checkpoint_save_accum_steps: int = 200, valid_dataloader: DataLoader | None = None,
-                valid_steps: int = 200) -> int:
+                valid_steps: int = 200, device: torch.device | None = None) -> int:
+    if device is None:
+        device = _get_train_device()
     print("Data loader size: ", len(dataloader))
     n=len(dataloader)
     total_loss = 0.0
@@ -174,10 +196,10 @@ def train_epoch(dataloader: DataLoader, model: torch.nn.Module, optimizer: Optim
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        input_ids = input_ids.cuda()
-        labels = labels.cuda()
+        input_ids = input_ids.to(device)
+        labels = labels.to(device)
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with _autocast_context(device):
             logits = model(input_ids, None)
             ce_loss = cross_entropy_loss(logits, labels)
         loss = ce_loss / gradient_accumulate
@@ -208,10 +230,12 @@ def train_epoch(dataloader: DataLoader, model: torch.nn.Module, optimizer: Optim
                 print_real_update_ratios(model, param_before)
             optimizer.zero_grad()
             opt_step += 1
-            if writer is not None:
+            if wandb_run is not None:
                 current_step = opt_step + last_train_step
-                writer.add_scalar("train/lr_accum_step", lr, current_step)
-                writer.add_scalar("train/loss_accum_step", current_accum_avg_loss, current_step)
+                wandb_run.log({
+                    "train/lr_accum_step": lr,
+                    "train/loss_accum_step": current_accum_avg_loss,
+                }, step=current_step)
             accum_loss = 0.0
             accum_count = 0
 
@@ -230,9 +254,9 @@ def train_epoch(dataloader: DataLoader, model: torch.nn.Module, optimizer: Optim
             and opt_step > 0
             and opt_step % valid_steps == 0
         ):
-            valid_loss = _eval_validation_loss(model, valid_dataloader)
-            if writer is not None:
-                writer.add_scalar("valid/loss_accum_step", valid_loss, current_global_step)
+            valid_loss = _eval_validation_loss(model, valid_dataloader, device)
+            if wandb_run is not None:
+                wandb_run.log({"valid/loss_accum_step": valid_loss}, step=current_global_step)
             print(
                 f"({i + 1}/{n + 1}) Validation average loss {valid_loss} "
                 f"(global_step={current_global_step}, accum_step={opt_step})"
@@ -250,6 +274,8 @@ if __name__ == "__main__":
 
     train_config, config, optimizer_config = load_train_config(args.config)
     _param_estimate(config)
+    device = _get_train_device()
+    print(f"Using device: {device}")
 
     checkpoint = train_config.checkpoint if train_config.checkpoint else None
     model = init_model_from_checkpoint(config, checkpoint)
@@ -257,20 +283,28 @@ if __name__ == "__main__":
     optimizer, t = init_optimizer_from_checkpoint(optimizer_config, model, optimizer_checkpoint)
 
     model.train()
-    model.to("cuda")
-    model = torch.compile(model)
+    model.to(device)
+    if device.type == "cuda":
+        model = torch.compile(model)
 
     for state in optimizer.state.values():
         for k, v in state.items():
             if torch.is_tensor(v):
-                state[k] = v.cuda()
+                state[k] = v.to(device)
 
     experiment_dir = os.path.join(train_config.checkpoint_base_dir, train_config.project_name)
     checkpoint_dir = experiment_dir
-    tensorboard_dir = os.path.join(TENSORBOARD_ROOT, train_config.project_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
-    os.makedirs(tensorboard_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=tensorboard_dir)
+    wandb_run = wandb.init(
+        project=train_config.project_name,
+        name=f"{train_config.project_name}_pretrain",
+        config={
+            "training": asdict(train_config),
+            "model": asdict(config),
+            "optimizer": asdict(optimizer_config),
+            "device": str(device),
+        },
+    )
 
     dataset = get_dataset(
         train_config.data_dir,
@@ -299,11 +333,12 @@ if __name__ == "__main__":
             train_config.gradient_accumulate,
             train_config.fix_lr,
             train_config.print_optimizer_update_ratio,
-            writer,
+            wandb_run,
             train_config.checkpoint_save_accum_steps,
             valid_dataloader,
             train_config.valid_steps,
+            device,
         )
         if hasattr(dataset, "reset"):
             dataset.reset()
-    writer.close()
+    wandb_run.finish()
