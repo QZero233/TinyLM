@@ -382,7 +382,7 @@ if __name__ == '__main__':
     # print(ids)
     # print(tokenizer.decode([6795, 8713, 45, 2367, 2296, 1144, 313, 113, 321, 215]))
     # tokenizer.dump("/home/qzero/cs336/assignment1-basics/data/saved_tokenizer_story/")
-    # with open("/home/qzero/cs336/assignment1-basics/tests/fixtures/tinystories_sample_5M.txt") as f:
+    # with open("/home/qzero/cs336/assignment1-basics/test/fixtures/tinystories_sample_5M.txt") as f:
     #     ids = []
     #     for _id in tokenizer.encode_iterable(f):
     #         ids.append(_id)

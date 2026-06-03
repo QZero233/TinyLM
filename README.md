@@ -41,6 +41,7 @@ TinyLM 是一个从零实现的 Transformer 语言模型项目，基于 **PyTorc
 
 - 从零实现 Transformer 核心模块（多头注意力、RoPE、RMSNorm、SwiGLU）
 - 完整的预训练 + SFT + LoRA 微调流程
+- 可选 Hugging Face Transformers Trainer 训练入口
 - 推理阶段 KV Cache 增量解码
 - 统一的 JSON 配置文件管理所有训练参数
 - 基于 `uv` 的简洁运行方式
@@ -162,6 +163,43 @@ uv run tiny_lm/train_model.py
   }
 }
 ```
+
+#### 使用 Hugging Face Transformers 训练
+
+如果希望使用 Hugging Face `Trainer` 进行训练，可以使用 `tiny_lm/hf/train_hf.py`。它复用同一份 JSON 配置和预训练 `.bin` 数据，但 checkpoint 会保存为 Hugging Face 格式，默认目录为：
+
+```
+{checkpoint_base_dir}/{project_name}_hf/
+```
+
+启动训练：
+
+```bash
+uv run python -m tiny_lm.hf.train_hf --config configs/train_zh.json
+```
+
+常用参数：
+
+```bash
+uv run python -m tiny_lm.hf.train_hf \
+  --config configs/train_zh.json \
+  --output-dir checkpoint_train/zh_pretrain_139M_hf \
+  --max-steps 1000
+```
+
+从 Hugging Face checkpoint 恢复训练：
+
+```bash
+uv run python -m tiny_lm.hf.train_hf \
+  --config configs/train_zh.json \
+  --resume-from-checkpoint checkpoint_train/zh_pretrain_139M_hf/checkpoint-1000
+```
+
+说明：
+
+- `train_hf.py` 不读取项目手写模型的 `.cpt` checkpoint。
+- `training.checkpoint` 只有在指向 Hugging Face checkpoint 目录时才会用于恢复训练。
+- Hugging Face 训练脚本会使用项目数据集已经右移好的 `labels`，loss 行为与手写训练脚本保持一致。
 
 ### 3. 指令微调
 
